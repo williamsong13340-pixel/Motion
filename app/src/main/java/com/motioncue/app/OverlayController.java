@@ -1,6 +1,8 @@
 package com.motioncue.app;
 
+import android.content.ComponentCallbacks;
 import android.content.Context;
+import android.content.res.Configuration;
 import android.graphics.PixelFormat;
 import android.graphics.Point;
 import android.graphics.Rect;
@@ -28,8 +30,23 @@ public final class OverlayController implements CueField.Callback {
     private final WindowManager wm;
     private final CueField field;
     private final ArrayList<CueOverlayView> views = new ArrayList<>();
+    private final ArrayList<Rect> rects = new ArrayList<>();
     private boolean attached;
     private int screenW, screenH;
+
+    /**
+     * 旋转时 DisplayListener 和窗口上下文的配置更新到达顺序不确定，两边都监听，
+     * 尺寸统一从 Display（与 getRotation() 同一份 DisplayInfo）读取。
+     */
+    private final ComponentCallbacks configCallbacks = new ComponentCallbacks() {
+        @Override
+        public void onConfigurationChanged(Configuration newConfig) {
+            onDisplayChanged();
+        }
+
+        @Override
+        public void onLowMemory() {}
+    };
 
     public OverlayController(Context ctx, MotionEngine engine) {
         this.ctx = ctx;
@@ -38,6 +55,16 @@ public final class OverlayController implements CueField.Callback {
         field.setCallback(this);
         updateScreenSize();
         field.applySettings();
+        ctx.registerComponentCallbacks(configCallbacks);
+    }
+
+    /** 服务销毁时调用 */
+    public void release() {
+        removeNow();
+        try {
+            ctx.unregisterComponentCallbacks(configCallbacks);
+        } catch (RuntimeException ignored) {
+        }
     }
 
     public CueField field() { return field; }
@@ -50,7 +77,22 @@ public final class OverlayController implements CueField.Callback {
      */
     public void applySettings(boolean rebuild) {
         field.applySettings();
-        if (rebuild && attached) rebuildWindows();
+        if (!rebuild || !attached) return;
+        if (field.windowRects().equals(rects)) {
+            // 窗口位置不变（例如只改了透明度 / 刷新率）：原地更新，不闪烁
+            float alpha = windowAlpha();
+            for (int i = 0; i < views.size(); i++) {
+                CueOverlayView v = views.get(i);
+                applyViewFrameRate(v);
+                try {
+                    wm.updateViewLayout(v, layoutParams(rects.get(i), alpha));
+                } catch (RuntimeException ignored) {
+                }
+                v.invalidate();
+            }
+        } else {
+            rebuildWindows();
+        }
     }
 
     /** 屏幕旋转 / 分辨率变化 */
@@ -58,18 +100,16 @@ public final class OverlayController implements CueField.Callback {
         if (updateScreenSize() && attached) rebuildWindows();
     }
 
+    @SuppressWarnings("deprecation")
     private boolean updateScreenSize() {
-        int w, h;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            Rect b = wm.getMaximumWindowMetrics().getBounds();
-            w = b.width();
-            h = b.height();
-        } else {
-            Point p = new Point();
-            defaultDisplay().getRealSize(p);
-            w = p.x;
-            h = p.y;
-        }
+        // 与 MotionService 里 getRotation() 读的是同一份 DisplayInfo，旋转时两者一致
+        // （窗口上下文的 WindowMetrics 可能比 DisplayListener 回调晚一步更新）
+        Display d = defaultDisplay();
+        if (d == null) return false;
+        Point p = new Point();
+        d.getRealSize(p);
+        int w = p.x, h = p.y;
+        if (w <= 0 || h <= 0) return false;
         boolean changed = w != screenW || h != screenH;
         screenW = w;
         screenH = h;
@@ -133,6 +173,8 @@ public final class OverlayController implements CueField.Callback {
             }
             views.add(v);
         }
+        this.rects.clear();
+        this.rects.addAll(rects);
         return true;
     }
 
@@ -144,6 +186,7 @@ public final class OverlayController implements CueField.Callback {
             }
         }
         views.clear();
+        rects.clear();
     }
 
     /** 几何或布局改变时整体替换窗口（只在旋转 / 改设置时发生）。圆点的位移和淡入状态保留。 */

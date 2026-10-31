@@ -308,13 +308,26 @@ public final class MainActivity extends Activity {
         sb.setMax(max - min);
         sb.setProgress(Math.max(0, Math.min(max - min, value - min)));
         sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            private boolean tracking;
+
             @Override
             public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
                 t.setText(name + "：" + fmt.fmt(p + min));
-                if (fromUser) sink.put(p + min);
+                // 拖动过程中只更新文字，松手再保存（尺寸/数量/透明度会重建或更新悬浮窗，逐帧保存会闪烁）；
+                // 键盘 / 无障碍调整没有拖动过程，直接保存
+                if (fromUser && !tracking) sink.put(p + min);
             }
-            @Override public void onStartTrackingTouch(SeekBar s) {}
-            @Override public void onStopTrackingTouch(SeekBar s) {}
+
+            @Override
+            public void onStartTrackingTouch(SeekBar s) {
+                tracking = true;
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar s) {
+                tracking = false;
+                sink.put(s.getProgress() + min);
+            }
         });
         parent.addView(sb);
     }

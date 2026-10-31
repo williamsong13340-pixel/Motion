@@ -21,24 +21,29 @@ final class CueGeometry {
 
     int screenW, screenH;
     int layout = Prefs.LAYOUT_SIDES;
-    float dotR, strokeW;
+    float dotR, strokeW;   // dotR：实际绘制半径（可能比设置的小，见 compute）
     float sx, sy, half, x0, y0;
     float sideFull, sideZero, tbFull, tbZero;
+    private int pad;
+    private boolean fullScreenWindow;   // 只用一个全屏窗口（网格布局，或边缘带太宽）
+    private boolean topBottom;          // 「四周」布局里上下边带是否有窗口
 
     /**
      * @param minEdgePx 最外列与屏幕边缘的最小距离（通常为半径 + 描边 + 2dp）
+     * @param pad       窗口在遮罩可见范围外额外留出的边距（半径 + 描边 + 余量）
      */
-    void compute(int w, int h, int dotCount, int layout, float dotR, float strokeW, float minEdgePx) {
+    void compute(int w, int h, int dotCount, int layout, float dotR, float strokeW, float minEdgePx, int pad) {
         this.screenW = w;
         this.screenH = h;
         this.layout = layout;
         this.dotR = dotR;
         this.strokeW = strokeW;
+        this.pad = pad;
         if (w <= 0 || h <= 0) return;
         float minDim = Math.min(w, h);
         int n = Math.max(4, Math.min(16, dotCount));
         float s = minDim / n;                                    // 行内间距
-        float edge = Math.max(minDim * 0.05f, minEdgePx);         // 最外列离屏幕边缘的距离
+        float edge = Math.max(minDim * 0.04f, minEdgePx);         // 最外列离屏幕边缘的距离
 
         // 左右两侧的点列关于屏幕中线对称：两侧最外列之间正好是偶数个半间距
         int kx = Math.max(2, Math.round((w - 2 * edge) / (s / 2f)));
@@ -52,27 +57,41 @@ final class CueGeometry {
         sy = (h - 2 * edge) / ky;
         y0 = edge;
 
-        // 遮罩：静止时每条边显示两列（行），第三列（行）完全隐藏
-        sideFull = edge + 1.25f * half;
-        sideZero = edge + 1.75f * half;
-        tbFull = edge + 1.25f * sy;
-        tbZero = edge + 1.75f * sy;
+        // 点又大又密时（小屏 + 最大尺寸 + 最多点数）限制实际半径，保证相邻的点不会挤在一起
+        float nearest = Math.min(sx, (float) Math.hypot(half, sy));
+        // 含描边的直径最多占最近邻距离的 90%
+        this.dotR = Math.max(1f, Math.min(dotR, 0.45f * nearest - 0.5f * strokeW));
+
+        // 遮罩：静止时每条边显示两列（行），第三列（行）完全隐藏；内侧淡出区尽量窄，少遮挡内容
+        sideFull = edge + 1.15f * half;
+        sideZero = edge + 1.45f * half;
+        tbFull = edge + 1.15f * sy;
+        tbZero = edge + 1.45f * sy;
+
+        // 窗口布局决定（与 alphaAt 保持一致：没有窗口的地方，遮罩也不显示点）
+        int sideW = sideWidth(), tbH = tbHeight();
+        fullScreenWindow = layout == Prefs.LAYOUT_GRID || sideW * 2 >= w;
+        topBottom = !fullScreenWindow && layout == Prefs.LAYOUT_FRAME && tbH * 2 < h && w - 2 * sideW > 0;
     }
 
-    /** 当前布局需要的悬浮窗矩形（屏幕坐标），互不重叠。pad = 半径 + 描边 + 余量。 */
-    List<Rect> windowRects(int pad) {
+    private int sideWidth() { return (int) Math.ceil(sideZero) + pad; }
+
+    private int tbHeight() { return (int) Math.ceil(tbZero) + pad; }
+
+    /** 当前布局需要的悬浮窗矩形（屏幕坐标），互不重叠。 */
+    List<Rect> windowRects() {
         ArrayList<Rect> out = new ArrayList<>();
         int w = screenW, h = screenH;
         if (w <= 0 || h <= 0) return out;
-        int sideW = (int) Math.ceil(sideZero) + pad;
-        int tbH = (int) Math.ceil(tbZero) + pad;
-        if (layout == Prefs.LAYOUT_GRID || sideW * 2 >= w) {
+        if (fullScreenWindow) {
             out.add(new Rect(0, 0, w, h));
             return out;
         }
+        int sideW = sideWidth();
         out.add(new Rect(0, 0, sideW, h));
         out.add(new Rect(w - sideW, 0, w, h));
-        if (layout == Prefs.LAYOUT_FRAME && tbH * 2 < h && w - 2 * sideW > 0) {
+        if (topBottom) {
+            int tbH = tbHeight();
             out.add(new Rect(sideW, 0, w - sideW, tbH));
             out.add(new Rect(sideW, h - tbH, w - sideW, h));
         }
@@ -89,7 +108,11 @@ final class CueGeometry {
             case Prefs.LAYOUT_GRID:
                 return outerX(x) * outerY(y);
             case Prefs.LAYOUT_FRAME:
-                return Math.max(innerX(x) * outerX(x) * outerY(y), innerY(y) * outerY(y) * outerX(x));
+                if (topBottom || fullScreenWindow) {
+                    return Math.max(innerX(x) * outerX(x) * outerY(y), innerY(y) * outerY(y) * outerX(x));
+                }
+                // 屏幕太小放不下上下边带的窗口：退化为两侧
+                return innerX(x) * outerX(x) * outerY(y);
             default:
                 return innerX(x) * outerX(x) * outerY(y);
         }

@@ -39,6 +39,7 @@ public final class MotionService extends Service implements MotionEngine.Listene
 
     private static final String CHANNEL = "motion_cues";
     private static final int NOTIF_ID = 1;
+    private static final int RESUME_NOTIF_ID = 2;
     private static final long DEMO_MS = 12_000;
 
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -48,6 +49,8 @@ public final class MotionService extends Service implements MotionEngine.Listene
     private AppOpsManager appOps;
     private boolean screenOn = true;
     private long screenOffAt;
+    /** 当前是否处于前台服务状态（startForeground 成功且未 stopForeground） */
+    private boolean inForeground;
 
     private final BroadcastReceiver screenReceiver = new BroadcastReceiver() {
         @Override
@@ -100,7 +103,7 @@ public final class MotionService extends Service implements MotionEngine.Listene
     public void onCreate() {
         super.onCreate();
         createChannel();
-        startInForeground();
+        inForeground = tryStartForeground();
 
         SensorManager sm = getSystemService(SensorManager.class);
         engine = new MotionEngine(sm);
@@ -142,7 +145,17 @@ public final class MotionService extends Service implements MotionEngine.Listene
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        startInForeground();
+        // 同一个服务实例里只在必要时调用 startForeground：从第二次调用起系统会重新检查后台启动限制，
+        // Android 15 下（没有可见悬浮窗时）可能直接抛异常。
+        if (!inForeground) inForeground = tryStartForeground();
+        if (!inForeground) {
+            // 典型情况：进程被杀后系统按 START_STICKY 重启服务，但此时不允许从后台进入前台。
+            // 不要反复崩溃重启：提示用户点一下恢复，然后安静地停止。
+            notifyResumeNeeded();
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        cancelResumeNotification();
         String action = intent != null ? intent.getAction() : null;
         if (ACTION_STOP.equals(action)) {
             Prefs.setMode(this, Prefs.MODE_OFF);
@@ -164,6 +177,7 @@ public final class MotionService extends Service implements MotionEngine.Listene
             engine.stop();
             overlay.removeNow();
             stopForeground(STOP_FOREGROUND_REMOVE);
+            inForeground = false;
             stopSelf();
             return;
         }
@@ -282,18 +296,48 @@ public final class MotionService extends Service implements MotionEngine.Listene
         return b.build();
     }
 
-    private void startInForeground() {
+    /** @return false 表示系统不允许进入前台（ForegroundServiceStartNotAllowedException 等） */
+    private boolean tryStartForeground() {
         Notification n = buildNotification();
-        if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
-        } else {
-            startForeground(NOTIF_ID, n);
+        try {
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+            } else {
+                startForeground(NOTIF_ID, n);
+            }
+            return true;
+        } catch (RuntimeException e) {
+            return false;
         }
     }
 
     private void updateNotification() {
+        if (!inForeground) return;
         NotificationManager nm = getSystemService(NotificationManager.class);
         nm.notify(NOTIF_ID, buildNotification());
+    }
+
+    /** 服务被系统停掉、又无法在后台恢复时，留一条普通通知让用户一键恢复 */
+    private void notifyResumeNeeded() {
+        if (Prefs.mode(this) == Prefs.MODE_OFF) return;
+        PendingIntent pi = PendingIntent.getActivity(this, 3,
+                new Intent(this, StarterActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        Notification.Builder b = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? new Notification.Builder(this, CHANNEL) : new Notification.Builder(this);
+        b.setSmallIcon(R.drawable.ic_stat)
+                .setContentTitle("乘车动态提示已暂停")
+                .setContentText("服务被系统停止，点此恢复（设为「不限制后台耗电」可避免）")
+                .setContentIntent(pi)
+                .setAutoCancel(true);
+        try {
+            getSystemService(NotificationManager.class).notify(RESUME_NOTIF_ID, b.build());
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    private void cancelResumeNotification() {
+        getSystemService(NotificationManager.class).cancel(RESUME_NOTIF_ID);
     }
 
     @Override
@@ -309,7 +353,7 @@ public final class MotionService extends Service implements MotionEngine.Listene
         }
         dm.unregisterDisplayListener(this);
         engine.stop();
-        overlay.removeNow();
+        overlay.release();
         main.removeCallbacksAndMessages(null);
         LiveStats.serviceRunning = false;
         LiveStats.overlayShown = false;

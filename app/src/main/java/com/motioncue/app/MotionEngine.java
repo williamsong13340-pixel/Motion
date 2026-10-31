@@ -15,8 +15,9 @@ import android.view.Surface;
  *
  * 思路（与 iOS Vehicle Motion Cues / Android Motion Assist 一致，基于感觉冲突理论）：
  *  1. 用 GAME_ROTATION_VECTOR（陀螺仪 + 加速度计融合，不受车内磁场干扰）得到「竖直向上」方向 u。
- *  2. 「右方」r = 屏幕右方在水平面上的投影；「前方」f = u × r（屏幕上方对应前方，像车头朝上的地图）。
- *     r、f 都在水平面内，所以加速度与它们点乘就自动去掉了重力，只剩车辆的水平加速度。
+ *  2. 「右方」「前方」直接取屏幕轴在水平面上的投影（屏幕上方对应前方，竖着拿时「往屏幕里」对应前方）。
+ *     它们都在水平面内，所以加速度与它们点乘就自动去掉了重力，只剩车辆的水平加速度；
+ *     结果就是车里「没固定的小球」的滑动方向在屏幕上的投影，屏幕朝上、竖直、朝下都正确。
  *  3. 角速度在 u 上的投影就是车辆的偏航角速度（转弯）。
  *  4. 低通滤波（晕动症敏感频段约 0.1–0.5Hz，车辆操控 < 1Hz）滤掉路面颠簸和手抖；
  *     有门限的慢速去偏（只吸收小的零漂/姿态误差，不吞掉真实的长时间加速），软死区，手持晃动抑制。
@@ -39,6 +40,8 @@ public final class MotionEngine implements SensorEventListener {
     private static final float YAW_LP_HZ = 1.0f;
     private static final float ACC_DEADZONE = 0.07f;  // m/s²
     private static final float YAW_DEADZONE = 0.02f;  // rad/s
+    /** 屏幕轴水平投影长度低于此值时，该方向的提示增益开始减小 */
+    private static final float AXIS_MIN = 0.35f;
 
     // 去偏：只学习小偏差（传感器零漂、约 2° 以内的姿态误差），真实的持续加速/弯道不会被吸收
     private static final float ACC_BIAS_TAU = 30f;
@@ -57,7 +60,7 @@ public final class MotionEngine implements SensorEventListener {
     private final Sensor accSensor, gyroSensor, rotSensor, stepSensor;
     private boolean useStep;
 
-    // 输出（渲染线程读取）
+    // 输出（渲染线程读取）：前后 / 左右加速度（m/s²，相对屏幕），偏航映射到屏幕 x 方向（rad/s）
     public volatile float outForward, outRight, outYaw;
 
     // 状态（仅传感器线程访问）
@@ -66,6 +69,7 @@ public final class MotionEngine implements SensorEventListener {
     private boolean haveUp;
     private final float[] fwd = {0, 1, 0};      // 水平前方（设备坐标）
     private final float[] right = {1, 0, 0};    // 水平右方（设备坐标）
+    private float yawToScreenX = 1f;            // 偏航 → 屏幕 x 方向的符号与增益
     private final float[] gyro = new float[3];
     private boolean haveGyro;
     private long lastAccNs, lastGyroNs;
@@ -179,6 +183,7 @@ public final class MotionEngine implements SensorEventListener {
         handling = 0;
         fwd[0] = 0; fwd[1] = 1; fwd[2] = 0;
         right[0] = 1; right[1] = 0; right[2] = 0;
+        yawToScreenX = 1f;
         outForward = outRight = outYaw = 0;
     }
 
@@ -292,7 +297,8 @@ public final class MotionEngine implements SensorEventListener {
 
         float outF = softDeadzone(fwdA, ACC_DEADZONE) * handling;
         float outR = softDeadzone(rightA, ACC_DEADZONE) * handling;
-        float outY = softDeadzone(yawR, YAW_DEADZONE) * handling;
+        float yawOut = softDeadzone(yawR, YAW_DEADZONE) * handling;   // 车辆偏航（+ = 左转）
+        float outY = yawOut * yawToScreenX;                           // 映射到屏幕 x 方向
 
         if (Float.isNaN(outF) || Float.isNaN(outR) || Float.isNaN(outY)) {
             // 理论上不会发生；万一发生就整体复位，绝不让 NaN 进入渲染
@@ -301,7 +307,7 @@ public final class MotionEngine implements SensorEventListener {
         }
 
         // ---- 乘车检测 ----
-        boolean veh = detector.onSample(e.timestamp, dt, amag, fwdA * handling, rightA * handling, outY);
+        boolean veh = detector.onSample(e.timestamp, dt, amag, fwdA * handling, rightA * handling, yawOut);
 
         // ---- 演示模式：注入一段模拟的加速/刹车/转弯 ----
         long now = SystemClock.elapsedRealtime();
@@ -322,7 +328,7 @@ public final class MotionEngine implements SensorEventListener {
 
         LiveStats.accelForward = outF;
         LiveStats.accelRight = outR;
-        LiveStats.yawRate = outY;
+        LiveStats.yawRate = yawOut;
         LiveStats.handlingGain = handling;
 
         Listener l = listener;
@@ -336,7 +342,15 @@ public final class MotionEngine implements SensorEventListener {
     }
 
     /**
-     * 根据屏幕方向计算水平的「右方」和「前方」（设备坐标）。
+     * 根据屏幕方向计算「右方」「前方」两个水平投影向量（设备坐标），以及偏航提示的方向。
+     *
+     * 两个轴都直接取屏幕轴在水平面上的投影（不靠与竖直方向做叉乘推出另一个轴）：
+     * 提示 = 车里「没固定的小球」的滑动方向在屏幕上的投影，因此屏幕朝上、竖直、朝下（躺着举在脸上方）
+     * 以及各种屏幕旋转都一致正确。
+     *  - 右方 = 屏幕右方的水平投影；
+     *  - 前方 = 屏幕上方的水平投影 + |屏幕上方的竖直分量| × 屏幕背面(-Z)的水平投影。
+     *    手机竖着拿时屏幕上方几乎竖直，此时把「往屏幕里」当作前方（约定：前方对应屏幕上方）。
+     * 轴接近水平时增益为 1；轴越接近竖直（无法显示水平运动），增益平滑降到 0。
      *
      * Display.getRotation() 是画面相对自然方向的旋转，与机身的物理旋转方向相反：
      * 机身逆时针转 90° → ROTATION_90，此时屏幕右方 = 设备 -Y，屏幕上方 = 设备 +X。
@@ -350,33 +364,33 @@ public final class MotionEngine implements SensorEventListener {
             default:                   rsx = 1;  rsy = 0;  usx = 0;  usy = 1;  break;
         }
 
-        // 首选：右方 = 屏幕右方的水平投影；前方 = 上 × 右。侧倾手机时前后方向不会歪。
+        // 屏幕右方的水平投影
         float d = rsx * u[0] + rsy * u[1];
         float rx = rsx - d * u[0], ry = rsy - d * u[1], rz = -d * u[2];
-        float rl = (float) Math.sqrt(rx * rx + ry * ry + rz * rz);
-        if (rl > 0.3f) {
-            right[0] = rx / rl; right[1] = ry / rl; right[2] = rz / rl;
-            cross(u, right, fwd);
-            return;
-        }
+        // 屏幕上方的水平投影
+        float du = usx * u[0] + usy * u[1];
+        float ux = usx - du * u[0], uy = usy - du * u[1], uz = -du * u[2];
+        // 屏幕背面 (-Z) 的水平投影
+        float dz = -u[2];
+        float zx = -dz * u[0], zy = -dz * u[1], zz = -1f - dz * u[2];
+        float w = Math.abs(du);
+        float fx = ux + w * zx, fy = uy + w * zy, fz = uz + w * zz;
 
-        // 屏幕右方几乎竖直（手机侧立）：改用 水平化(屏幕上方) + 水平化(屏幕背面 -Z) 作为前方
-        float d1 = usx * u[0] + usy * u[1];
-        float hx = usx - d1 * u[0], hy = usy - d1 * u[1], hz = -d1 * u[2];
-        float d2 = -u[2];
-        hx += -d2 * u[0];
-        hy += -d2 * u[1];
-        hz += -1 - d2 * u[2];
-        float hl = (float) Math.sqrt(hx * hx + hy * hy + hz * hz);
-        if (hl > 0.15f) {
-            fwd[0] = hx / hl; fwd[1] = hy / hl; fwd[2] = hz / hl;
+        float rl = (float) Math.sqrt(rx * rx + ry * ry + rz * rz);
+        float fl = (float) Math.sqrt(fx * fx + fy * fy + fz * fz);
+        float rg = 1f / Math.max(rl, AXIS_MIN), fg = 1f / Math.max(fl, AXIS_MIN);
+        right[0] = rx * rg; right[1] = ry * rg; right[2] = rz * rg;
+        fwd[0] = fx * fg; fwd[1] = fy * fg; fwd[2] = fz * fg;
+
+        // 偏航提示方向：假设车头 ≈ 屏幕前方。左转时车的「左方」= u × 前方，
+        // 小球滑向车的右方 → 屏幕 x 分量 = -(左方 · 屏幕右方)。屏幕朝下时自动取反。
+        if (rl > 1e-3f && fl > 1e-3f) {
+            float hx = fx / fl, hy = fy / fl, hz = fz / fl;
+            float lx = u[1] * hz - u[2] * hy, ly = u[2] * hx - u[0] * hz, lz = u[0] * hy - u[1] * hx;
+            yawToScreenX = -(lx * rx + ly * ry + lz * rz) / rl * Math.min(1f, rl / AXIS_MIN);
         } else {
-            // 退化姿态：沿用上一次的前方，但重新投影到当前水平面
-            float dd = fwd[0] * u[0] + fwd[1] * u[1] + fwd[2] * u[2];
-            fwd[0] -= dd * u[0]; fwd[1] -= dd * u[1]; fwd[2] -= dd * u[2];
-            if (!normalize(fwd)) { fwd[0] = 0; fwd[1] = 1; fwd[2] = 0; }
+            yawToScreenX = 0f;
         }
-        cross(fwd, u, right);
     }
 
     // ---------------- 工具函数 ----------------
@@ -412,14 +426,6 @@ public final class MotionEngine implements SensorEventListener {
 
     static float clamp(float v, float lo, float hi) {
         return v < lo ? lo : (v > hi ? hi : v);
-    }
-
-    /** out = a × b */
-    private static void cross(float[] a, float[] b, float[] out) {
-        float x = a[1] * b[2] - a[2] * b[1];
-        float y = a[2] * b[0] - a[0] * b[2];
-        float z = a[0] * b[1] - a[1] * b[0];
-        out[0] = x; out[1] = y; out[2] = z;
     }
 
     /** @return false 表示向量长度为 0 或 NaN，无法归一化 */

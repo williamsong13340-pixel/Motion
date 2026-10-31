@@ -130,13 +130,18 @@ public final class VehicleDetector {
         boolean recentStep = tNs - lastStepNs < 8_000_000_000L;
 
         periodicStreak = (per > 0.6f && walkRms > 0.15f) ? periodicStreak + 1 : 0;
-        boolean walking = recentStep || walkRms > 0.6f || periodicStreak >= 2;
+        // 确定在走路（计步器、或步频能量很大）：快速退出
+        boolean walking = recentStep || walkRms > 0.6f;
+        // 只是「看起来有周期」：车身弹跳、减速带也可能这样，所以只阻止进入、缓慢扣分，不把乘车状态踢掉
+        boolean maybeWalking = periodicStreak >= 2;
         boolean vibration = vibRms > 0.025f && vibRms < 1.5f;
         // 车辆转弯一定伴随向心加速度；只有偏航没有线加速度，多半是手在慢慢转动手机
         boolean maneuver = motion > 0.15f || (yawRms > 0.05f && motion > 0.06f);
 
         if (walking) {
             score -= 6f * step;
+        } else if (maybeWalking) {
+            score -= 0.15f * step;
         } else if (vibration && maneuver) {
             score += 1f * step;
         } else if (vibration) {

@@ -125,12 +125,13 @@ final class CueField implements Choreographer.FrameCallback {
     }
 
     private void computeGeometry() {
-        geo.compute(screenW, screenH, dotCount, layout, dotR, strokeW, dotR + strokeW + dp(2));
+        float margin = dotR + strokeW + dp(2);
+        geo.compute(screenW, screenH, dotCount, layout, dotR, strokeW, margin, (int) Math.ceil(margin));
     }
 
     /** 当前布局需要的悬浮窗矩形（屏幕坐标），互不重叠。 */
     List<Rect> windowRects() {
-        return geo.windowRects((int) Math.ceil(dotR + strokeW + dp(2)));
+        return geo.windowRects();
     }
 
     // ---------------- 窗口 ----------------
@@ -307,11 +308,12 @@ final class CueField implements Choreographer.FrameCallback {
             float a = alpha * fade;
             if (a <= 0.004f) return;
             float cx = x - ox, cy = y - oy;
+            float r = geo.dotR;
             fill.setAlpha(Math.round(255 * a));
-            canvas.drawCircle(cx, cy, dotR, fill);
+            canvas.drawCircle(cx, cy, r, fill);
             if (stroke) {
                 CueField.this.stroke.setAlpha(Math.round(0xCC * a));
-                canvas.drawCircle(cx, cy, dotR, CueField.this.stroke);
+                canvas.drawCircle(cx, cy, r, CueField.this.stroke);
             }
         }
     }
