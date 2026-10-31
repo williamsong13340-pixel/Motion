@@ -67,14 +67,16 @@ final class DotStyle {
                 rim = darkTheme ? 0xFF000000 : 0xFFFFFFFF; rimAlpha = darkTheme ? 0.40f : 0.60f;
                 break;
             default: // 自动：跟随系统深浅色
+                // 描边较宽较实：内容与主题一致时描边融进背景看不见；不一致（深色模式下的浅色页面、
+                // 浅色模式下的视频）时由描边勾出圆点，对比度仍 ≥ 3:1
                 if (darkTheme) {
-                    core = 0xFFEDEEF2; coreAlpha = 0.94f; rim = 0xFF000000; rimAlpha = 0.45f;
+                    core = 0xFFEDEEF2; coreAlpha = 0.94f; rim = 0xFF000000; rimAlpha = 0.72f;
                 } else {
-                    core = 0xFF2C2D32; coreAlpha = 0.88f; rim = 0xFFFFFFFF; rimAlpha = 0.65f;
+                    core = 0xFF2C2D32; coreAlpha = 0.88f; rim = 0xFFFFFFFF; rimAlpha = 0.80f;
                 }
                 break;
         }
-        rimW = 1.2f * dp;
+        rimW = (colorMode == Prefs.COLOR_AUTO ? 1.7f : 1.2f) * dp;
         coreA = Math.round(255 * coreAlpha);
         rimA = Math.round(255 * rimAlpha);
         coreFill.setColor(core);

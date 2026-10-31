@@ -123,7 +123,21 @@ public final class OverlayController implements CueField.Callback {
         screenW = w;
         screenH = h;
         field.setScreenSize(w, h);
+        field.setCornerRadius(cornerRadius(d));
         return changed;
+    }
+
+    /** 屏幕圆角半径（Android 12+ 系统提供；取四个角中最大的） */
+    private static float cornerRadius(Display d) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return 0f;
+        int max = 0;
+        int[] pos = {android.view.RoundedCorner.POSITION_TOP_LEFT, android.view.RoundedCorner.POSITION_TOP_RIGHT,
+                android.view.RoundedCorner.POSITION_BOTTOM_LEFT, android.view.RoundedCorner.POSITION_BOTTOM_RIGHT};
+        for (int p : pos) {
+            android.view.RoundedCorner rc = d.getRoundedCorner(p);
+            if (rc != null) max = Math.max(max, rc.getRadius());
+        }
+        return max;
     }
 
     private Display defaultDisplay() {

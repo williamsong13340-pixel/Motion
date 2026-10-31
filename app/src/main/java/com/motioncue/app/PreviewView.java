@@ -156,6 +156,7 @@ final class PreviewView extends View implements Choreographer.FrameCallback {
         screenClip.reset();
         screenClip.addRoundRect(screen, bodyR - inset, bodyR - inset, Path.Direction.CW);
         k = screen.width() / screenW;
+        geo.setCornerRadius(Math.max(0f, bodyR - inset) / k);   // 迷你手机屏幕的圆角（换算到真实像素）
         invalidate();
     }
 
@@ -167,7 +168,7 @@ final class PreviewView extends View implements Choreographer.FrameCallback {
         lastNs = frameTimeNanos;
 
         float aF, aR, yawX;
-        live = LiveStats.serviceRunning;
+        live = LiveStats.engineRunning;   // 引擎停了（例如缺悬浮窗权限）就回到模拟演示，不显示过期数据
         if (live) {
             aF = LiveStats.accelForward;
             aR = LiveStats.accelRight;

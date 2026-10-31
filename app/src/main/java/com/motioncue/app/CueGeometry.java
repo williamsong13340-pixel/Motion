@@ -26,6 +26,8 @@ final class CueGeometry {
     float sideFull, sideZero, tbFull, tbZero;
     private int pad;
     private float drawPad;              // 枚举点时的外扩（含尾迹），可大于窗口外扩
+    private float outerFullX, outerZeroX, outerFullY, outerZeroY;   // 靠屏幕物理边缘的淡出
+    private float cornerR;              // 屏幕圆角半径（px），角上的点提前淡出
     private boolean fullScreenWindow;   // 只用一个全屏窗口（网格布局，或边缘带太宽）
     private boolean topBottom;          // 「四周」布局里上下边带是否有窗口
 
@@ -72,6 +74,16 @@ final class CueGeometry {
         tbFull = edge + 1.2f * sy;
         tbZero = edge + 1.6f * sy;
 
+        // 靠屏幕边缘的淡出与实际绘制的半径挂钩：圆点碰到屏幕边缘之前就开始淡出，而不是被切掉一半；
+        // 同时保证静止时屏幕外那一列（行）完全不可见
+        float rDraw = this.dotR + strokeW;
+        outerFullX = Math.min(rDraw, x0);
+        outerZeroX = Math.max(x0 - half, outerFullX - 0.5f * half);
+        if (outerZeroX >= outerFullX) outerZeroX = outerFullX - 1f;
+        outerFullY = Math.min(rDraw, y0);
+        outerZeroY = Math.max(y0 - sy, outerFullY - 0.5f * sy);
+        if (outerZeroY >= outerFullY) outerZeroY = outerFullY - 1f;
+
         // 窗口布局决定（与 alphaAt 保持一致：没有窗口的地方，遮罩也不显示点）
         int sideW = sideWidth(), tbH = tbHeight();
         fullScreenWindow = layout == Prefs.LAYOUT_GRID || sideW * 2 >= w;
@@ -80,6 +92,9 @@ final class CueGeometry {
 
     /** 点的最大绘制范围（含放大、光晕、尾迹）：跨窗口边界的点两边都要画到 */
     void setDrawPad(float px) { drawPad = px; }
+
+    /** 屏幕圆角半径（px，0 = 直角） */
+    void setCornerRadius(float px) { cornerR = Math.max(0f, px); }
 
     /** 从左右屏幕边缘往里数第几列（0 = 最外列，可为小数） */
     float sideColumn(float x) {
@@ -124,6 +139,23 @@ final class CueGeometry {
      * 运动时点走到屏幕边缘前先淡出，而不是被生硬地切掉。
      */
     float alphaAt(float x, float y) {
+        float a = maskAt(x, y);
+        if (a <= 0f || cornerR <= 0f) return a;
+        return a * cornerAlpha(x, y);
+    }
+
+    /** 圆角处：圆点完整落在圆角内才完全可见，压到圆角边缘时已淡出 */
+    private float cornerAlpha(float x, float y) {
+        float cx = MotionEngine.clamp(x, cornerR, screenW - cornerR);
+        float cy = MotionEngine.clamp(y, cornerR, screenH - cornerR);
+        float dx = x - cx, dy = y - cy;
+        if (dx == 0f && dy == 0f) return 1f;
+        float d = (float) Math.sqrt(dx * dx + dy * dy);
+        float rDraw = dotR + strokeW;
+        return 1f - MotionEngine.smoothstep(cornerR - rDraw, cornerR, d);
+    }
+
+    private float maskAt(float x, float y) {
         switch (layout) {
             case Prefs.LAYOUT_GRID:
                 return outerX(x) * outerY(y);
@@ -148,14 +180,14 @@ final class CueGeometry {
         return 1f - MotionEngine.smoothstep(tbFull, tbZero, Math.min(y, screenH - y));
     }
 
-    /** 靠左右屏幕边缘的淡出：最外列（距边 edge）完全可见，再往外一列（edge - half）完全隐藏 */
+    /** 靠左右屏幕边缘的淡出：最外列完全可见，碰到屏幕边缘前开始淡出，再往外一列完全隐藏 */
     private float outerX(float x) {
-        return MotionEngine.smoothstep(x0 - 0.75f * half, x0 - 0.25f * half, Math.min(x, screenW - x));
+        return MotionEngine.smoothstep(outerZeroX, outerFullX, Math.min(x, screenW - x));
     }
 
     /** 靠上下屏幕边缘的淡出 */
     private float outerY(float y) {
-        return MotionEngine.smoothstep(y0 - 0.75f * sy, y0 - 0.25f * sy, Math.min(y, screenH - y));
+        return MotionEngine.smoothstep(outerZeroY, outerFullY, Math.min(y, screenH - y));
     }
 
     /**

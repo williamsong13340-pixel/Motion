@@ -5,6 +5,7 @@ public final class LiveStats {
     private LiveStats() {}
 
     public static volatile boolean serviceRunning;
+    public static volatile boolean engineRunning;   // 传感器引擎正在运行（实时数据有效）
     public static volatile boolean overlayShown;
     public static volatile boolean demoActive;
 

@@ -221,10 +221,10 @@ public final class MainActivity extends Activity {
         permCard.addView(ui.title("还需要几步设置", 16f));
         permOverlay = permRow("悬浮窗权限", "必需：在其它 App 上方显示圆点", "去开启", true, v -> openOverlaySettings());
         permNotif = permRow("通知", "显示常驻开关和快捷操作", "允许", false, v -> {
-            if (Build.VERSION.SDK_INT >= 33) requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_PERMS);
+            if (Build.VERSION.SDK_INT >= 33) askOrOpenSettings(Manifest.permission.POST_NOTIFICATIONS, true);
         });
         permStep = permRow("身体活动", "用计步器区分走路和乘车，自动模式更准", "允许", false, v -> {
-            if (Build.VERSION.SDK_INT >= 29) requestPermissions(new String[]{Manifest.permission.ACTIVITY_RECOGNITION}, REQ_PERMS);
+            if (Build.VERSION.SDK_INT >= 29) askOrOpenSettings(Manifest.permission.ACTIVITY_RECOGNITION, false);
         });
         permBattery = permRow("后台运行", "不限制耗电，防止被系统清理", "去设置", false, v -> openBatterySettings());
         content.addView(permCard, top(14));
@@ -365,9 +365,30 @@ public final class MainActivity extends Activity {
     }
 
     private void maybeAskStepPermission() {
-        if (Build.VERSION.SDK_INT >= 29 && !granted(Manifest.permission.ACTIVITY_RECOGNITION)) {
-            requestPermissions(new String[]{Manifest.permission.ACTIVITY_RECOGNITION}, REQ_PERMS);
+        if (Build.VERSION.SDK_INT >= 29 && !granted(Manifest.permission.ACTIVITY_RECOGNITION)
+                && !Prefs.sp(this).getBoolean("asked_" + Manifest.permission.ACTIVITY_RECOGNITION, false)) {
+            askOrOpenSettings(Manifest.permission.ACTIVITY_RECOGNITION, false);
         }
+    }
+
+    /**
+     * 第一次直接申请；被拒绝且系统不再弹窗（「不再询问」或拒绝两次）后，改为打开对应的系统设置页，
+     * 否则按钮点了没反应。
+     */
+    private void askOrOpenSettings(String perm, boolean notification) {
+        SharedPreferences sp = Prefs.sp(this);
+        String key = "asked_" + perm;
+        if (sp.getBoolean(key, false) && !shouldShowRequestPermissionRationale(perm)) {
+            if (notification) {
+                startActivity(new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                        .putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName()));
+            } else {
+                openAppDetails();
+            }
+            return;
+        }
+        sp.edit().putBoolean(key, true).apply();
+        requestPermissions(new String[]{perm}, REQ_PERMS);
     }
 
     private void syncModeUi() {

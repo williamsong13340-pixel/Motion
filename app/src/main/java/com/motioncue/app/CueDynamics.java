@@ -77,6 +77,9 @@ final class CueDynamics {
         return MotionEngine.smoothstep(0.08f, MIN_DRAW, size) * (0.72f + 0.28f * Math.min(1f, size));
     }
 
+    /** 当前（最外列的）强度 0..1，供诊断显示 */
+    float intensity() { return lvl[0]; }
+
     /** 第 c 列（可为小数）的强度 */
     private float level(float c) {
         if (c <= 0f) return lvl[0];

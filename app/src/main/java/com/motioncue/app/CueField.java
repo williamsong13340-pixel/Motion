@@ -98,6 +98,12 @@ final class CueField implements Choreographer.FrameCallback {
         startFrames();
     }
 
+    /** 屏幕圆角半径（px）：角上的点提前淡出，不会被圆角切掉一半 */
+    void setCornerRadius(float px) {
+        geo.setCornerRadius(px);
+        invalidateViews();
+    }
+
     /** @return true 表示尺寸有变化 */
     boolean setScreenSize(int w, int h) {
         if (w == screenW && h == screenH) return false;

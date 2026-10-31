@@ -30,7 +30,8 @@ final class Palette {
             warning = 0xFFB45309;
         }
         accent = accentColor(c, dark);
-        onAccent = 0xFFFFFFFF;
+        // 深色模式的主题色是浅色调，上面的文字要用深色，否则对比度不够
+        onAccent = dark ? onAccentDark(c) : 0xFFFFFFFF;
         accentSoft = (accent & 0x00FFFFFF) | (dark ? 0x33000000 : 0x1F000000);
     }
 
@@ -47,6 +48,16 @@ final class Palette {
             }
         }
         return dark ? 0xFF8AB4FF : 0xFF2F6BFF;
+    }
+
+    private static int onAccentDark(Context c) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                return c.getColor(android.R.color.system_accent1_900);
+            } catch (RuntimeException ignored) {
+            }
+        }
+        return 0xFF0B1A33;
     }
 
     /** 圆点用的主题色：取中间色调，在亮、暗内容上都清楚 */

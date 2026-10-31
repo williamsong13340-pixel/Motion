@@ -135,6 +135,13 @@ final class Ui {
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             lp.leftMargin = dp(12);
             h.addView(trailing, lp);
+            if (trailing instanceof Switch) {
+                // 读屏能读出开关是做什么的；点整行也能切换
+                Switch sw = (Switch) trailing;
+                sw.setContentDescription(subtitle == null || subtitle.isEmpty() ? title : title + "，" + subtitle);
+                h.setBackground(pressable(pal.surface, 14));
+                h.setOnClickListener(v -> sw.toggle());
+            }
         }
         r.view = h;
         return r;
