@@ -66,7 +66,7 @@ public final class Prefs {
     public static float dotSize(Context c) { return sp(c).getFloat(K_SIZE, 4.5f); }
     /** 每侧每列的点数 */
     public static int dotCount(Context c) { return sp(c).getInt(K_COUNT, 9); }
-    public static float opacity(Context c) { return sp(c).getFloat(K_OPACITY, 0.85f); }
+    public static float opacity(Context c) { return sp(c).getFloat(K_OPACITY, 0.8f); }
     public static int layout(Context c) { return sp(c).getInt(K_LAYOUT, LAYOUT_SIDES); }
     public static int color(Context c) { return sp(c).getInt(K_COLOR, COLOR_AUTO); }
     public static int refresh(Context c) { return sp(c).getInt(K_REFRESH, REFRESH_FOLLOW); }

@@ -16,7 +16,7 @@ final class DotStyle {
     private static final float MAX_TRAIL = 1.5f;
     /** 彗尾分三段叠加：越靠近圆点越浓、越粗 */
     private static final int TRAIL_SEGMENTS = 3;
-    private static final float TRAIL_SEGMENT_ALPHA = 0.17f;
+    private static final float TRAIL_SEGMENT_ALPHA = 0.22f;
     static final float MAX_SCALE = 1.2f;
 
     private final Paint coreFill = fill();

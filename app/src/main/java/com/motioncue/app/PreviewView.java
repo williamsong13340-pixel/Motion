@@ -16,8 +16,8 @@ import android.view.View;
  */
 final class PreviewView extends View implements Choreographer.FrameCallback {
 
-    /** 预览里手机很小，圆点和光晕按此倍数放大，保证看得清 */
-    private static final float EXAGGERATE = 1.7f;
+    /** 预览里手机很小，圆点尺寸按此倍数放大保证看得清；位移不放大，和真实悬浮层的比例一致 */
+    private static final float EXAGGERATE = 1.45f;
 
     private final Palette pal;
     private final Choreographer choreographer = Choreographer.getInstance();
@@ -61,11 +61,11 @@ final class PreviewView extends View implements Choreographer.FrameCallback {
         super(ctx);
         this.pal = pal;
         dp1 = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 1, ctx.getResources().getDisplayMetrics());
-        bodyPaint.setColor(pal.dark ? 0xFF2B2E35 : 0xFF1D1F24);
+        bodyPaint.setColor(pal.dark ? 0xFF3A3D45 : 0xFF3A3D44);
         screenPaint.setColor(pal.dark ? 0xFF14161A : 0xFFF8F9FB);
         blockPaint.setColor(pal.dark ? 0xFF262931 : 0xFFE7E9EE);
-        chipPaint.setColor(pal.dark ? 0xCC000000 : 0xB3FFFFFF);
-        chipText.setColor(pal.dark ? 0xFFE6E8EC : 0xFF3B3F46);
+        chipPaint.setColor(pal.surfaceVariant);
+        chipText.setColor(pal.textSecondary);
         chipText.setTextSize(11.5f * dp1);
         chipText.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         reload();
@@ -148,7 +148,7 @@ final class PreviewView extends View implements Choreographer.FrameCallback {
         }
         float left = (w - bw) / 2f, top = (h - bh) / 2f;
         body.set(left, top, left + bw, top + bh);
-        float inset = Math.max(3 * dp1, bw * 0.03f);
+        float inset = Math.max(1.5f * dp1, bw * 0.011f);   // 细边框，更轻盈
         screen.set(body.left + inset, body.top + inset, body.right - inset, body.bottom - inset);
         float bodyR = Math.min(bw, bh) * 0.13f;
         screenClip.reset();
@@ -178,12 +178,11 @@ final class PreviewView extends View implements Choreographer.FrameCallback {
             aR = (float) (-1.0 * Math.sin(2 * Math.PI * t / 7.5 + 1.2));
             yawX = (float) (-aR * 0.14);
         }
-        // 位移按真实屏幕像素计算，再随预览一起缩小；放大倍数让小手机上也看得出运动
-        float pxPerDp = dp1 * EXAGGERATE;
-        float tx = CueResponse.targetX(aR, yawX, sensitivity, yawCue, pxPerDp);
-        float ty = CueResponse.targetY(aF, sensitivity, pxPerDp);
+        // 位移按真实屏幕像素计算（与悬浮层完全相同），再随预览一起缩小
+        float tx = CueResponse.targetX(aR, yawX, sensitivity, yawCue, dp1);
+        float ty = CueResponse.targetY(aF, sensitivity, dp1);
         CueResponse.springStep(st, tx, ty, dt);
-        activity = CueResponse.activity(activity, (float) Math.hypot(st[2], st[3]), pxPerDp, dt);
+        activity = CueResponse.activity(activity, (float) Math.hypot(st[2], st[3]), dp1, dt);
         invalidate();
         post();
     }

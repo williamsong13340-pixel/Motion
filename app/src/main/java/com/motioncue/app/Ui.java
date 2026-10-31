@@ -144,8 +144,9 @@ final class Ui {
         Switch s = new Switch(ctx);
         s.setChecked(checked);
         int[][] states = {{android.R.attr.state_checked}, {}};
-        s.setThumbTintList(new ColorStateList(states, new int[]{0xFFFFFFFF, pal.dark ? 0xFFB8BCC4 : 0xFFFFFFFF}));
-        s.setTrackTintList(new ColorStateList(states, new int[]{pal.accent, pal.dark ? 0xFF3A3E46 : 0xFFD5D8DE}));
+        // 打开：主题色滑块 + 主题色轨道；关闭：浅色滑块 + 明显的灰色轨道（白卡片上也看得清）
+        s.setThumbTintList(new ColorStateList(states, new int[]{pal.accent, pal.dark ? 0xFFC4C7CE : 0xFFF4F5F7}));
+        s.setTrackTintList(new ColorStateList(states, new int[]{pal.accent, pal.dark ? 0xFF7A808A : 0xFF5F656E}));
         s.setShowText(false);
         return s;
     }
@@ -254,7 +255,7 @@ final class Ui {
         sb.setProgress(Math.max(0, Math.min(max - min, value - min)));
         sb.setProgressTintList(ColorStateList.valueOf(pal.accent));
         sb.setThumbTintList(ColorStateList.valueOf(pal.accent));
-        sb.setProgressBackgroundTintList(ColorStateList.valueOf(pal.dark ? 0xFF3A3E46 : 0xFFD9DCE2));
+        sb.setProgressBackgroundTintList(ColorStateList.valueOf(pal.dark ? 0xFF5A5F69 : 0xFFB9BEC6));
         sb.setPadding(dp(4), dp(10), dp(4), dp(6));
         sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             private boolean tracking;

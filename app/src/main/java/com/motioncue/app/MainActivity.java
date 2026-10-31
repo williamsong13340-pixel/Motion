@@ -295,10 +295,13 @@ public final class MainActivity extends Activity {
         content.addView(ui.collapsible("原理与说明", "感觉冲突理论、传感器融合、参考文献",
                 ui.text(ABOUT, 14f, pal.textSecondary)), top(12));
 
-        TextView ver = ui.secondary("版本 " + versionName());
-        ver.setGravity(Gravity.CENTER);
-        ver.setTextSize(12f);
-        content.addView(ver, top(20));
+        String vn = versionName();
+        if (vn != null && !vn.isEmpty()) {
+            TextView ver = ui.secondary("版本 " + vn);
+            ver.setGravity(Gravity.CENTER);
+            ver.setTextSize(12f);
+            content.addView(ver, top(20));
+        }
     }
 
     private Ui.Row permRow(String title, String desc, String action, boolean primary, View.OnClickListener l) {
