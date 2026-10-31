@@ -17,19 +17,14 @@ final class DotStyle {
     /** 彗尾分三段叠加：越靠近圆点越浓、越粗 */
     private static final int TRAIL_SEGMENTS = 3;
     private static final float TRAIL_SEGMENT_ALPHA = 0.22f;
-    static final float MAX_SCALE = 1.2f;
 
     private final Paint coreFill = fill();
     private final Paint rimRing = ring();
     private final Paint trailLine = line();
 
-    private float radius = 12f;
+    private float radius = 12f;          // 最大半径（尺寸系数为 1 时）
     private float rimW;
     private int coreA = 255, rimA;
-
-    // 每帧的强调参数
-    private float scale = 1f;
-    private float alphaMul = 1f;
 
     private static Paint fill() {
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -86,7 +81,6 @@ final class DotStyle {
         trailLine.setColor(core);
         rimRing.setColor(rim);
         rimRing.setStrokeWidth(rimW);
-        beginFrame(1f, 1f);
     }
 
     float radius() { return radius; }
@@ -94,26 +88,20 @@ final class DotStyle {
     /** 圆芯之外的描边宽度 */
     float haloWidth() { return rimW; }
 
-    /** 一个点（含放大、描边、尾迹）离圆心最远能画到多远 */
+    /** 一个点（最大尺寸，含描边、尾迹）离圆心最远能画到多远 */
     float maxExtent() {
-        float r = radius * MAX_SCALE;
-        return r + rimW + MAX_TRAIL * r;
-    }
-
-    /** 每帧开始时设置强调参数（所有点共用） */
-    void beginFrame(float scale, float alphaMul) {
-        this.scale = scale;
-        this.alphaMul = alphaMul;
+        return radius + rimW + MAX_TRAIL * radius;
     }
 
     /**
      * @param vx    圆点速度（px/s），用于尾迹
      * @param alpha 0..1（遮罩、淡入淡出已乘好）
+     * @param size  尺寸系数 0..1（CueDynamics 计算）
      */
-    void draw(Canvas c, float x, float y, float vx, float vy, float alpha) {
-        float a = alpha * alphaMul;
-        if (a <= 0.004f) return;
-        float r = radius * scale;
+    void draw(Canvas c, float x, float y, float vx, float vy, float alpha, float size) {
+        float a = alpha;
+        float r = radius * size;
+        if (a <= 0.004f || r < 0.6f) return;
 
         // 彗尾：从圆心向运动反方向延伸；三段由短到长叠加，越靠近圆点越浓，越远越细越淡
         float tx = vx * TRAIL_TIME, ty = vy * TRAIL_TIME;
@@ -139,9 +127,11 @@ final class DotStyle {
         }
         int ra = Math.round(rimA * a);
         if (ra > 0) {
-            // 描边是圆芯外侧的一圈，不和半透明的圆芯重叠
+            // 描边是圆芯外侧的一圈，不和半透明的圆芯重叠；小点的描边也相应变细
+            float rw = rimW * (0.45f + 0.55f * Math.min(1f, size));
+            rimRing.setStrokeWidth(rw);
             rimRing.setAlpha(ra);
-            c.drawCircle(x, y, r + rimW * 0.5f, rimRing);
+            c.drawCircle(x, y, r + rw * 0.5f, rimRing);
         }
         coreFill.setAlpha(Math.round(coreA * a));
         c.drawCircle(x, y, r, coreFill);

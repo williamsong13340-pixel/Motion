@@ -58,9 +58,9 @@ final class CueField implements Choreographer.FrameCallback {
     private int screenW, screenH;
     private final DrawSink drawSink = new DrawSink();
 
-    // 物理状态（主线程）：{px, py, vx, vy}
-    private final float[] st = new float[4];
-    private float activity;                 // 运动强调 0..1
+    // 动态（主线程）：位移弹簧、强度、方向堆积
+    private final CueDynamics dyn = new CueDynamics();
+    private final float[] st = dyn.st;      // {px, py, vx, vy}
     private float fade, fadeTarget;
     private long lastFrameNs;
     private boolean running;
@@ -112,7 +112,7 @@ final class CueField implements Choreographer.FrameCallback {
         boolean dark = isDarkTheme();
         style.configure(colorMode, dotR, dp1, accent, dark);
         float halo = style.haloWidth();
-        float body = dotR * DotStyle.MAX_SCALE + halo + dp(2);   // 圆点本体（放大 + 光晕）
+        float body = dotR + halo + dp(2);   // 圆点本体（最大尺寸 + 描边）
         // 窗口只需容纳圆点本体：遮罩内侧边界处的点已几乎透明，尾迹被窗口裁掉也看不出来，窗口更窄、遮挡更少
         geo.compute(screenW, screenH, dotCount, layout, dotR, halo, body, (int) Math.ceil(body));
         geo.setDrawPad(style.maxExtent() + dp(2));
@@ -167,8 +167,7 @@ final class CueField implements Choreographer.FrameCallback {
 
     /** 窗口重新出现时从静止位置开始，不带上次隐藏前的位移。 */
     void resetMotion() {
-        st[0] = st[1] = st[2] = st[3] = 0f;
-        activity = 0f;
+        dyn.reset();
         fade = 0f;
     }
 
@@ -224,9 +223,7 @@ final class CueField implements Choreographer.FrameCallback {
         }
         lastFrameNs = frameTimeNanos;
 
-        float tx = targetX(), ty = targetY();
-        CueResponse.springStep(st, tx, ty, dt);
-        activity = CueResponse.activity(activity, (float) Math.hypot(st[2], st[3]), dp1, dt);
+        boolean still = dyn.step(dt, engine.outForward, engine.outRight, engine.outYaw, sensitivity, yawCue, dp1);
 
         float fs = dt / FADE_S;
         if (fade < fadeTarget) fade = Math.min(fadeTarget, fade + fs);
@@ -241,13 +238,11 @@ final class CueField implements Choreographer.FrameCallback {
             if (callback != null) callback.onFadedOut();
             return;
         }
-        boolean settled = Math.abs(tx - st[0]) < 0.3f && Math.abs(ty - st[1]) < 0.3f
-                && Math.abs(st[2]) < 2f && Math.abs(st[3]) < 2f && activity < 0.01f
-                && fade == fadeTarget && !engine.demoActive();
+        boolean settled = still && fade == fadeTarget && !engine.demoActive();
         if (settled) {
             // 停止逐帧回调，等待传感器唤醒（先写目标再置 idle，传感器线程据此比较）
-            idleTx = tx;
-            idleTy = ty;
+            idleTx = targetX();
+            idleTy = targetY();
             idle = true;
             LiveStats.animIdle = true;
             fpsEma = 0;
@@ -260,12 +255,13 @@ final class CueField implements Choreographer.FrameCallback {
     /** 由各窗口的 onDraw 调用：把屏幕坐标的点阵画进窗口（窗口左上角在屏幕上的位置为 ox, oy）。 */
     void draw(Canvas canvas, int ox, int oy, int vw, int vh) {
         if (fade <= 0f) return;
-        style.beginFrame(CueResponse.scaleFor(activity), CueResponse.alphaFor(activity));
         DrawSink d = drawSink;
         d.canvas = canvas;
         d.ox = ox;
         d.oy = oy;
-        d.fadeA = CueResponse.ease(fade);
+        float e = CueResponse.ease(fade);
+        d.fadeA = e;
+        d.fadeSize = 0.35f + 0.65f * e;   // 出现时圆点从小「绽放」开来
         geo.forEachDot(ox, oy, ox + vw, oy + vh, st[0], st[1], d);
         d.canvas = null;
     }
@@ -274,11 +270,14 @@ final class CueField implements Choreographer.FrameCallback {
     private final class DrawSink implements CueGeometry.DotSink {
         Canvas canvas;
         int ox, oy;
-        float fadeA;
+        float fadeA, fadeSize;
 
         @Override
         public void dot(float x, float y, float alpha) {
-            style.draw(canvas, x - ox, y - oy, st[2], st[3], alpha * fadeA);
+            float size = dyn.size(geo, x, y);
+            if (size <= 0f) return;
+            style.draw(canvas, x - ox, y - oy, st[2], st[3],
+                    alpha * fadeA * CueDynamics.drawAlpha(size), CueDynamics.drawSize(size) * fadeSize);
         }
     }
 }

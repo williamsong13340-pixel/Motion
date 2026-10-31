@@ -73,21 +73,6 @@ final class CueResponse {
         s[0] = px; s[1] = py; s[2] = vx; s[3] = vy;
     }
 
-    /**
-     * 运动强调：圆点移动越快越醒目（略微放大、更不透明、带拖影），静止时稍微收敛，不打扰阅读。
-     * 车辆运动的「变化」正是前庭最敏感、最需要视觉配合的时刻。
-     * @return 新的强调值 0..1（起势快、回落慢）
-     */
-    static float activity(float current, float speedPx, float dp, float dt) {
-        float target = MotionEngine.smoothstep(8f * dp, 90f * dp, speedPx);
-        float tau = target > current ? 0.06f : 0.35f;
-        return current + (target - current) * MotionEngine.alphaTau(dt, tau);
-    }
-
-    static float scaleFor(float activity) { return 1f + 0.2f * activity; }
-
-    static float alphaFor(float activity) { return 0.82f + 0.18f * activity; }
-
     /** 淡入淡出的缓动 */
     static float ease(float t) {
         return t * t * (3f - 2f * t);

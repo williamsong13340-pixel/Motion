@@ -10,7 +10,7 @@ import java.util.List;
  *
  * 点阵：交错排列，第 j 行的点在 x = x0 + (i + (j 为奇数 ? 0.5 : 0)) · sx，y = y0 + j · sy，
  * 整体再加上位移 (dx, dy)。点阵是无限的，所以任意位移下都铺满屏幕。
- * 遮罩：只让边缘带可见，静止时每条边显示两列（行），越往内越透明。
+ * 遮罩：只让边缘带可见（两侧最多三列、上下最多两行），越往内越透明；每个点的大小由 CueDynamics 决定。
  * 所有坐标都是屏幕像素。
  */
 final class CueGeometry {
@@ -65,11 +65,12 @@ final class CueGeometry {
         // 含描边的直径最多占最近邻距离的 90%
         this.dotR = Math.max(1f, Math.min(dotR, 0.45f * nearest - 0.5f * strokeW));
 
-        // 遮罩：静止时每条边显示两列（行），第三列（行）完全隐藏；内侧淡出区尽量窄，少遮挡内容
-        sideFull = edge + 1.15f * half;
-        sideZero = edge + 1.45f * half;
-        tbFull = edge + 1.15f * sy;
-        tbZero = edge + 1.45f * sy;
+        // 遮罩：两侧最多三列、上下最多两行可见（每一时刻实际显示几列由 CueDynamics 的尺寸决定），
+        // 再往里的完全隐藏，所以窗口宽度是固定的
+        sideFull = edge + 2.2f * half;
+        sideZero = edge + 2.6f * half;
+        tbFull = edge + 1.2f * sy;
+        tbZero = edge + 1.6f * sy;
 
         // 窗口布局决定（与 alphaAt 保持一致：没有窗口的地方，遮罩也不显示点）
         int sideW = sideWidth(), tbH = tbHeight();
@@ -79,6 +80,19 @@ final class CueGeometry {
 
     /** 点的最大绘制范围（含放大、光晕、尾迹）：跨窗口边界的点两边都要画到 */
     void setDrawPad(float px) { drawPad = px; }
+
+    /** 从左右屏幕边缘往里数第几列（0 = 最外列，可为小数） */
+    float sideColumn(float x) {
+        return half > 0f ? (Math.min(x, screenW - x) - x0) / half : 0f;
+    }
+
+    /** 从上下屏幕边缘往里数第几行（0 = 最外行，可为小数） */
+    float tbRow(float y) {
+        return sy > 0f ? (Math.min(y, screenH - y) - y0) / sy : 0f;
+    }
+
+    /** 「四周」布局是否有上下边带 */
+    boolean hasTopBottom() { return topBottom; }
 
     private int sideWidth() { return (int) Math.ceil(sideZero) + pad; }
 

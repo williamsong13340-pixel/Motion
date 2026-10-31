@@ -17,15 +17,15 @@ import android.view.View;
 final class PreviewView extends View implements Choreographer.FrameCallback {
 
     /** 预览里手机很小，圆点尺寸按此倍数放大保证看得清；位移不放大，和真实悬浮层的比例一致 */
-    private static final float EXAGGERATE = 1.45f;
+    private static final float EXAGGERATE = 1.25f;
 
     private final Palette pal;
     private final Choreographer choreographer = Choreographer.getInstance();
     private final CueGeometry geo = new CueGeometry();
     private final DotStyle style = new DotStyle();
     private final float dp1;
-    private final float[] st = new float[4];
-    private float activity;
+    private final CueDynamics dyn = new CueDynamics();
+    private final float[] st = dyn.st;
     private long lastNs;
     private boolean playing, posted;
     private float demoT;
@@ -53,7 +53,9 @@ final class PreviewView extends View implements Choreographer.FrameCallback {
 
         @Override
         public void dot(float x, float y, float alpha) {
-            style.draw(canvas, x, y, st[2], st[3], alpha);
+            float size = dyn.size(geo, x, y);
+            if (size <= 0f) return;
+            style.draw(canvas, x, y, st[2], st[3], alpha * CueDynamics.drawAlpha(size), CueDynamics.drawSize(size));
         }
     }
 
@@ -91,7 +93,7 @@ final class PreviewView extends View implements Choreographer.FrameCallback {
         int accent = Palette.dotAccent(c);
         style.configure(color, r, dpx, accent, pal.dark);
         float halo = style.haloWidth();
-        float body = r * DotStyle.MAX_SCALE + halo + 2 * dpx;
+        float body = r + halo + 2 * dpx;
         geo.compute(screenW, screenH, Prefs.dotCount(c), Prefs.layout(c), r, halo, body, (int) Math.ceil(body));
         geo.setDrawPad(style.maxExtent());
         style.configure(color, geo.dotR, dpx, accent, pal.dark);
@@ -179,10 +181,7 @@ final class PreviewView extends View implements Choreographer.FrameCallback {
             yawX = (float) (-aR * 0.14);
         }
         // 位移按真实屏幕像素计算（与悬浮层完全相同），再随预览一起缩小
-        float tx = CueResponse.targetX(aR, yawX, sensitivity, yawCue, dp1);
-        float ty = CueResponse.targetY(aF, sensitivity, dp1);
-        CueResponse.springStep(st, tx, ty, dt);
-        activity = CueResponse.activity(activity, (float) Math.hypot(st[2], st[3]), dp1, dt);
+        dyn.step(dt, aF, aR, yawX, sensitivity, yawCue, dp1);
         invalidate();
         post();
     }
@@ -200,7 +199,6 @@ final class PreviewView extends View implements Choreographer.FrameCallback {
         // 点阵：在真实屏幕坐标系里画，再整体缩放到预览大小
         c.translate(screen.left, screen.top);
         c.scale(k, k);
-        style.beginFrame(CueResponse.scaleFor(activity), CueResponse.alphaFor(activity));
         sink.canvas = c;
         geo.forEachDot(0, 0, screenW, screenH, st[0], st[1], sink);
         sink.canvas = null;

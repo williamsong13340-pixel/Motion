@@ -192,7 +192,7 @@ public final class MainActivity extends Activity {
         pc.setPadding(0, ui.dp(8), 0, ui.dp(16));
         preview = new PreviewView(this, pal);
         pc.addView(preview, Ui.matchWrap());
-        TextView cap = ui.secondary("加速时圆点往下、刹车往上，左转往右、右转往左");
+        TextView cap = ui.secondary("加速时圆点往下、刹车往上，左转往右、右转往左；运动越强，圆点越大越多");
         cap.setGravity(Gravity.CENTER);
         cap.setPadding(ui.dp(16), ui.dp(6), ui.dp(16), 0);
         pc.addView(cap, Ui.matchWrap());
@@ -242,7 +242,7 @@ public final class MainActivity extends Activity {
         ac.addView(ui.slider("灵敏度", 25, 300, Math.round(Prefs.sensitivity(this) * 100),
                 p -> String.format(Locale.US, "%.2f×", p / 100f),
                 p -> sp.edit().putFloat(Prefs.K_SENS, p / 100f).apply()), Ui.matchWrap());
-        ac.addView(ui.slider("圆点大小", 20, 100, Math.round(Prefs.dotSize(this) * 10),
+        ac.addView(ui.slider("圆点大小（运动时）", 20, 100, Math.round(Prefs.dotSize(this) * 10),
                 p -> String.format(Locale.US, "%.1f dp", p / 10f),
                 p -> sp.edit().putFloat(Prefs.K_SIZE, p / 10f).apply()), Ui.matchWrap());
         ac.addView(ui.slider("圆点密度", 4, 16, Prefs.dotCount(this),
@@ -323,6 +323,8 @@ public final class MainActivity extends Activity {
 
     private static final String ABOUT =
             "圆点像车里没有固定住的小球：加速时往后（下）滑，刹车时往前（上）滑，左转时往右、右转时往左。"
+                    + "同时运动越强，圆点越大、越多，并且往小球滑去的那一边「堆」起来——刹车时上半部分涨起来，左转时右侧涨起来；"
+                    + "车辆平稳时只留两列小点，不打扰阅读。\n\n"
                     + "晕动症主要来自「感觉冲突」——内耳前庭感到加减速和转弯，眼睛却盯着静止的屏幕；"
                     + "余光里与身体感受一致的运动可以减轻这种冲突。\n\n"
                     + "传感器：用「游戏旋转矢量」（陀螺仪 + 加速度计融合，不用磁力计，不受车内磁场干扰）估计竖直方向，"

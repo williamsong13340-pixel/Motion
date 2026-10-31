@@ -62,10 +62,10 @@ public final class Prefs {
 
     /** 灵敏度倍率 0.25 ~ 3.0 */
     public static float sensitivity(Context c) { return sp(c).getFloat(K_SENS, 1.0f); }
-    /** 圆点半径 dp */
-    public static float dotSize(Context c) { return sp(c).getFloat(K_SIZE, 4.5f); }
-    /** 每侧每列的点数 */
-    public static int dotCount(Context c) { return sp(c).getInt(K_COUNT, 9); }
+    /** 圆点最大半径 dp（运动最强时的大小；平稳时约为其 40%） */
+    public static float dotSize(Context c) { return sp(c).getFloat(K_SIZE, 5.0f); }
+    /** 点阵密度（屏幕短边上的点数） */
+    public static int dotCount(Context c) { return sp(c).getInt(K_COUNT, 11); }
     public static float opacity(Context c) { return sp(c).getFloat(K_OPACITY, 0.8f); }
     public static int layout(Context c) { return sp(c).getInt(K_LAYOUT, LAYOUT_SIDES); }
     public static int color(Context c) { return sp(c).getInt(K_COLOR, COLOR_AUTO); }
