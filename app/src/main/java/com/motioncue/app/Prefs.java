@@ -15,9 +15,10 @@ public final class Prefs {
     public static final int LAYOUT_FRAME = 1;  // 四周一圈
     public static final int LAYOUT_GRID = 2;   // 全屏稀疏网格
 
-    public static final int COLOR_AUTO = 0;  // 白点黑描边，任何背景都能看清
+    public static final int COLOR_AUTO = 0;  // 白芯 + 柔和暗晕，任何背景都能看清
     public static final int COLOR_WHITE = 1;
     public static final int COLOR_BLACK = 2;
+    public static final int COLOR_ACCENT = 3; // 跟随系统主题色（Android 12+ 动态取色）
 
     public static final int REFRESH_FOLLOW = 0; // 跟随系统（LTPO 自动调节，省电）
     public static final int REFRESH_MAX = 1;    // 请求最高刷新率（最流畅）
@@ -47,6 +48,16 @@ public final class Prefs {
         SharedPreferences.Editor e = sp(c).edit().putInt(K_MODE, mode);
         if (mode != MODE_OFF) e.putInt(K_LAST_MODE, mode);
         e.apply();
+    }
+
+    /** 上次使用的开启模式（自动 / 始终显示），主开关打开时恢复它；默认始终显示（最可靠） */
+    public static int lastOnMode(Context c) {
+        int m = sp(c).getInt(K_LAST_MODE, MODE_ALWAYS);
+        return m == MODE_AUTO ? MODE_AUTO : MODE_ALWAYS;
+    }
+
+    public static void setLastOnMode(Context c, int mode) {
+        sp(c).edit().putInt(K_LAST_MODE, mode == MODE_AUTO ? MODE_AUTO : MODE_ALWAYS).apply();
     }
 
     /** 灵敏度倍率 0.25 ~ 3.0 */

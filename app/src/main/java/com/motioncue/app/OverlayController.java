@@ -38,9 +38,17 @@ public final class OverlayController implements CueField.Callback {
      * 旋转时 DisplayListener 和窗口上下文的配置更新到达顺序不确定，两边都监听，
      * 尺寸统一从 Display（与 getRotation() 同一份 DisplayInfo）读取。
      */
+    private int uiMode;
+
     private final ComponentCallbacks configCallbacks = new ComponentCallbacks() {
         @Override
         public void onConfigurationChanged(Configuration newConfig) {
+            int night = newConfig.uiMode & Configuration.UI_MODE_NIGHT_MASK;
+            if (night != uiMode) {
+                // 系统深浅色切换：「自动」配色的圆点跟着换
+                uiMode = night;
+                field.applySettings();
+            }
             onDisplayChanged();
         }
 
@@ -54,6 +62,7 @@ public final class OverlayController implements CueField.Callback {
         this.field = new CueField(ctx, engine);
         field.setCallback(this);
         updateScreenSize();
+        uiMode = ctx.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
         field.applySettings();
         ctx.registerComponentCallbacks(configCallbacks);
     }

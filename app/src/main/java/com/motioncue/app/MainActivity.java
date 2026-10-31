@@ -5,8 +5,11 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.graphics.Color;
+import android.graphics.Insets;
+import android.graphics.Point;
+import android.graphics.Rect;
 import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
 import android.hardware.SensorManager;
 import android.hardware.display.DisplayManager;
 import android.net.Uri;
@@ -16,386 +19,434 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.provider.Settings;
-import android.text.method.LinkMovementMethod;
-import android.util.TypedValue;
 import android.view.Display;
 import android.view.Gravity;
 import android.view.View;
-import android.view.ViewGroup;
-import android.widget.Button;
-import android.widget.CompoundButton;
+import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.widget.LinearLayout;
-import android.widget.RadioButton;
-import android.widget.RadioGroup;
 import android.widget.ScrollView;
-import android.widget.SeekBar;
 import android.widget.Switch;
 import android.widget.TextView;
 
 import java.util.Locale;
 import java.util.TreeSet;
 
-/** 主界面：权限、模式、外观设置、实时状态（传感器 / 刷新率 / 乘车检测）。 */
+/** 主界面：实时预览、开关与模式、权限引导、外观与运动设置、诊断数据、原理说明。 */
 public final class MainActivity extends Activity {
 
     private static final int REQ_PERMS = 1;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private LinearLayout root;
-    private TextView statusText;
+    private Palette pal;
+    private Ui ui;
+    private LinearLayout content;
+    private PreviewView preview;
+    private Switch master;
+    private Ui.Row masterRow;
+    private Ui.Segmented modeSeg;
+    private TextView modeHint;
+    private LinearLayout permCard;
+    private Ui.Row permOverlay, permNotif, permStep, permBattery;
     private TextView liveText;
-    private Button overlayBtn, notifBtn, stepBtn, batteryBtn;
-    private RadioGroup modeGroup;
-    private boolean suppressModeEvents;
+    private boolean syncing;
 
     private final Runnable ticker = new Runnable() {
         @Override
         public void run() {
             updateLive();
-            handler.postDelayed(this, 200);
+            syncModeUi();
+            handler.postDelayed(this, 300);
         }
+    };
+
+    /** 设置变化（包括快捷开关、通知栏按钮改的模式）→ 刷新预览和开关状态 */
+    private final SharedPreferences.OnSharedPreferenceChangeListener prefListener = (sp, key) -> {
+        preview.reload();
+        syncModeUi();
     };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        pal = Palette.of(this);
+        ui = new Ui(this, pal);
+        setupWindow();
         buildUi();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        refreshPermissionState();
-        syncModeRadio();
+        refreshPermissions();
+        syncModeUi();
         if (Prefs.mode(this) != Prefs.MODE_OFF && Settings.canDrawOverlays(this)) {
             MotionService.start(this, MotionService.ACTION_APPLY);
         }
+        updatePreviewScreen();
+        preview.reload();
+        preview.setPlaying(true);
+        Prefs.sp(this).registerOnSharedPreferenceChangeListener(prefListener);
         handler.post(ticker);
     }
 
     @Override
     protected void onPause() {
         super.onPause();
+        preview.setPlaying(false);
+        Prefs.sp(this).unregisterOnSharedPreferenceChangeListener(prefListener);
         handler.removeCallbacks(ticker);
     }
 
-    // =============================== UI ===============================
+    // =============================== 窗口 ===============================
 
-    private int dp(float v) {
-        return Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, getResources().getDisplayMetrics()));
+    /** 沉浸式：内容延伸到状态栏/导航栏下面，状态栏图标颜色跟随深浅色 */
+    @SuppressWarnings("deprecation")
+    private void setupWindow() {
+        Window w = getWindow();
+        w.getDecorView().setBackgroundColor(pal.bg);
+        w.setStatusBarColor(Color.TRANSPARENT);
+        w.setNavigationBarColor(Color.TRANSPARENT);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) w.setNavigationBarContrastEnforced(false);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            w.setDecorFitsSystemWindows(false);
+            WindowInsetsController c = w.getInsetsController();
+            if (c != null) {
+                int mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                        | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                c.setSystemBarsAppearance(pal.dark ? 0 : mask, mask);
+            }
+        } else {
+            int flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+            if (!pal.dark) flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+            w.getDecorView().setSystemUiVisibility(flags);
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private void applyInsets(WindowInsets insets) {
+        int l, t, r, b;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Insets i = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+            l = i.left; t = i.top; r = i.right; b = i.bottom;
+        } else {
+            l = insets.getSystemWindowInsetLeft();
+            t = insets.getSystemWindowInsetTop();
+            r = insets.getSystemWindowInsetRight();
+            b = insets.getSystemWindowInsetBottom();
+        }
+        content.setPadding(ui.dp(16) + l, ui.dp(14) + t, ui.dp(16) + r, ui.dp(28) + b);
+    }
+
+    @SuppressWarnings("deprecation")
+    private void updatePreviewScreen() {
+        int w, h;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Rect b = getWindowManager().getMaximumWindowMetrics().getBounds();
+            w = b.width();
+            h = b.height();
+        } else {
+            Point p = new Point();
+            getWindowManager().getDefaultDisplay().getRealSize(p);
+            w = p.x;
+            h = p.y;
+        }
+        preview.setScreen(Math.min(w, h), Math.max(w, h));   // 预览始终画竖屏手机
+    }
+
+    // =============================== 界面 ===============================
+
+    private LinearLayout.LayoutParams top(float dpMargin) {
+        LinearLayout.LayoutParams lp = Ui.matchWrap();
+        lp.topMargin = ui.dp(dpMargin);
+        return lp;
     }
 
     private void buildUi() {
         ScrollView scroll = new ScrollView(this);
-        scroll.setFitsSystemWindows(true);
-        root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(18), dp(18), dp(18), dp(40));
-        scroll.addView(root);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.setClipToPadding(false);
+        content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(content);
+        scroll.setOnApplyWindowInsetsListener((v, insets) -> {
+            applyInsets(insets);
+            return insets;
+        });
         setContentView(scroll);
+        SharedPreferences sp = Prefs.sp(this);
 
-        TextView title = new TextView(this);
-        title.setText("乘车动态提示");
-        title.setTextSize(26);
+        // ---------- 标题 ----------
+        TextView title = ui.title("乘车动态提示", 28f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
-        root.addView(title);
-        TextView sub = text("在屏幕边缘显示随车辆运动而移动的圆点，让眼睛看到的运动和内耳感受到的一致，减轻看手机时的晕车。", 14);
-        sub.setAlpha(0.75f);
-        root.addView(sub);
+        title.setPadding(ui.dp(4), ui.dp(8), 0, 0);
+        content.addView(title);
+        TextView sub = ui.secondary("让眼睛看到的运动和身体感受到的一致，减轻看手机时的晕车");
+        sub.setPadding(ui.dp(4), ui.dp(4), ui.dp(4), 0);
+        content.addView(sub);
 
-        // ---------- 状态 / 权限 ----------
-        LinearLayout perm = card("权限");
-        statusText = text("", 14);
-        perm.addView(statusText);
-        overlayBtn = button("授予悬浮窗权限（必需）", v -> startActivity(new Intent(
-                Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName()))));
-        perm.addView(overlayBtn);
-        notifBtn = button("允许通知（显示常驻开关）", v -> {
+        // ---------- 预览 ----------
+        LinearLayout pc = ui.card();
+        pc.setPadding(0, ui.dp(8), 0, ui.dp(16));
+        preview = new PreviewView(this, pal);
+        pc.addView(preview, Ui.matchWrap());
+        TextView cap = ui.secondary("加速时圆点往下、刹车往上，左转往右、右转往左");
+        cap.setGravity(Gravity.CENTER);
+        cap.setPadding(ui.dp(16), ui.dp(6), ui.dp(16), 0);
+        pc.addView(cap, Ui.matchWrap());
+        content.addView(pc, top(18));
+
+        // ---------- 开关与模式 ----------
+        LinearLayout mc = ui.card();
+        master = ui.toggle(Prefs.mode(this) != Prefs.MODE_OFF);
+        masterRow = ui.row("运动提示", "", master);
+        mc.addView(masterRow.view, Ui.matchWrap());
+        modeSeg = ui.segmented(new String[]{"自动检测乘车", "始终显示"},
+                Prefs.lastOnMode(this) == Prefs.MODE_AUTO ? 0 : 1,
+                i -> onModeChosen(i == 0 ? Prefs.MODE_AUTO : Prefs.MODE_ALWAYS));
+        mc.addView(modeSeg, top(12));
+        modeHint = ui.secondary("");
+        modeHint.setPadding(ui.dp(2), 0, ui.dp(2), 0);
+        mc.addView(modeHint, top(10));
+        mc.addView(ui.tonalButton("演示 12 秒（模拟加速、转弯、刹车）", v -> demo()), top(14));
+        master.setOnCheckedChangeListener((b, on) -> {
+            if (!syncing) onMasterToggled(on);
+        });
+        content.addView(mc, top(14));
+
+        // ---------- 权限（缺什么才显示什么） ----------
+        permCard = ui.card();
+        permCard.addView(ui.title("还需要几步设置", 16f));
+        permOverlay = permRow("悬浮窗权限", "必需：在其它 App 上方显示圆点", "去开启", true, v -> openOverlaySettings());
+        permNotif = permRow("通知", "显示常驻开关和快捷操作", "允许", false, v -> {
             if (Build.VERSION.SDK_INT >= 33) requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_PERMS);
         });
-        perm.addView(notifBtn);
-        stepBtn = button("允许「身体活动」（区分走路和乘车，可选）", v -> {
+        permStep = permRow("身体活动", "用计步器区分走路和乘车，自动模式更准", "允许", false, v -> {
             if (Build.VERSION.SDK_INT >= 29) requestPermissions(new String[]{Manifest.permission.ACTIVITY_RECOGNITION}, REQ_PERMS);
         });
-        perm.addView(stepBtn);
-        batteryBtn = button("不限制后台耗电（防止被系统杀掉）", v -> {
-            try {
-                startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                        Uri.parse("package:" + getPackageName())));
-            } catch (RuntimeException e) {
-                startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
-            }
-        });
-        perm.addView(batteryBtn);
-        perm.addView(button("打开应用详情（ColorOS：耗电管理 → 允许后台/自启动）", v ->
-                startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                        Uri.parse("package:" + getPackageName())))));
-
-        // ---------- 模式 ----------
-        LinearLayout modeCard = card("模式");
-        modeGroup = new RadioGroup(this);
-        modeGroup.setOrientation(RadioGroup.VERTICAL);
-        addRadio(modeGroup, Prefs.MODE_OFF, "关闭");
-        addRadio(modeGroup, Prefs.MODE_AUTO, "自动（检测到乘车时显示，实验性）");
-        addRadio(modeGroup, Prefs.MODE_ALWAYS, "始终显示");
-        modeGroup.setOnCheckedChangeListener((g, id) -> {
-            if (suppressModeEvents) return;
-            View v = g.findViewById(id);
-            if (v == null) return;
-            int mode = (Integer) v.getTag();
-            if (mode != Prefs.MODE_OFF && !Settings.canDrawOverlays(this)) {
-                overlayBtn.performClick();
-            } else if (mode == Prefs.MODE_AUTO && Build.VERSION.SDK_INT >= 29
-                    && !granted(Manifest.permission.ACTIVITY_RECOGNITION)) {
-                // 自动模式靠计步器区分走路和乘车，最准确
-                requestPermissions(new String[]{Manifest.permission.ACTIVITY_RECOGNITION}, REQ_PERMS);
-            }
-            Prefs.setMode(this, mode);
-            MotionService.sync(this);
-        });
-        modeCard.addView(modeGroup);
-        modeCard.addView(button("演示 12 秒（模拟加速/刹车/转弯，在家测试用）", v -> {
-            if (!Settings.canDrawOverlays(this)) {
-                overlayBtn.performClick();
-                return;
-            }
-            MotionService.start(this, MotionService.ACTION_DEMO);
-        }));
-        TextView tip = text("提示：也可以在下拉控制中心添加「防晕车圆点」快捷开关，点一下切换 关闭 → 始终显示 → 自动。", 13);
-        tip.setAlpha(0.7f);
-        modeCard.addView(tip);
+        permBattery = permRow("后台运行", "不限制耗电，防止被系统清理", "去设置", false, v -> openBatterySettings());
+        content.addView(permCard, top(14));
 
         // ---------- 外观 ----------
-        SharedPreferences sp = Prefs.sp(this);
-        LinearLayout look = card("外观与灵敏度");
-        addSlider(look, "灵敏度", 25, 300, Math.round(Prefs.sensitivity(this) * 100),
+        content.addView(ui.sectionHeader("外观"));
+        LinearLayout ac = ui.card();
+        ac.addView(ui.title("布局", 15f));
+        ac.addView(ui.segmented(new String[]{"两侧", "四周", "网格"}, Prefs.layout(this),
+                i -> sp.edit().putInt(Prefs.K_LAYOUT, i).apply()), top(8));
+        ac.addView(ui.title("颜色", 15f), top(16));
+        ac.addView(ui.segmented(new String[]{"自动", "白色", "黑色", "主题色"}, Prefs.color(this),
+                i -> sp.edit().putInt(Prefs.K_COLOR, i).apply()), top(8));
+        ac.addView(ui.divider());
+        ac.addView(ui.slider("灵敏度", 25, 300, Math.round(Prefs.sensitivity(this) * 100),
                 p -> String.format(Locale.US, "%.2f×", p / 100f),
-                p -> sp.edit().putFloat(Prefs.K_SENS, p / 100f).apply());
-        addSlider(look, "圆点大小", 20, 100, Math.round(Prefs.dotSize(this) * 10),
+                p -> sp.edit().putFloat(Prefs.K_SENS, p / 100f).apply()), Ui.matchWrap());
+        ac.addView(ui.slider("圆点大小", 20, 100, Math.round(Prefs.dotSize(this) * 10),
                 p -> String.format(Locale.US, "%.1f dp", p / 10f),
-                p -> sp.edit().putFloat(Prefs.K_SIZE, p / 10f).apply());
-        addSlider(look, "圆点数量（每列）", 4, 16, Prefs.dotCount(this),
-                p -> p + " 个",
-                p -> sp.edit().putInt(Prefs.K_COUNT, p).apply());
-        addSlider(look, "不透明度", 20, 100, Math.round(Prefs.opacity(this) * 100),
-                p -> p + "%" + (Build.VERSION.SDK_INT >= 31 && p > 80 ? "（系统限制最高 80%，否则会挡住触摸）" : ""),
-                p -> sp.edit().putFloat(Prefs.K_OPACITY, p / 100f).apply());
+                p -> sp.edit().putFloat(Prefs.K_SIZE, p / 10f).apply()), Ui.matchWrap());
+        ac.addView(ui.slider("圆点密度", 4, 16, Prefs.dotCount(this),
+                p -> p <= 6 ? "稀疏" : (p <= 11 ? "适中" : "密集"),
+                p -> sp.edit().putInt(Prefs.K_COUNT, p).apply()), Ui.matchWrap());
+        ac.addView(ui.slider("不透明度", 20, 100, Math.round(Prefs.opacity(this) * 100),
+                p -> p + "%",
+                p -> sp.edit().putFloat(Prefs.K_OPACITY, p / 100f).apply()), Ui.matchWrap());
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            TextView note = ui.secondary("系统规定悬浮层最高 80% 不透明，否则会挡住下面 App 的触摸。");
+            note.setTextSize(12.5f);
+            ac.addView(note, top(2));
+        }
+        content.addView(ac);
 
-        look.addView(label("布局"));
-        look.addView(choice(new String[]{"两侧", "四周", "全屏网格"}, Prefs.layout(this),
-                i -> sp.edit().putInt(Prefs.K_LAYOUT, i).apply()));
-        look.addView(label("颜色"));
-        look.addView(choice(new String[]{"自动（白点黑边）", "白色", "黑色"}, Prefs.color(this),
-                i -> sp.edit().putInt(Prefs.K_COLOR, i).apply()));
+        // ---------- 运动与刷新率 ----------
+        content.addView(ui.sectionHeader("运动与刷新率"));
+        LinearLayout mo = ui.card();
+        Switch yaw = ui.toggle(Prefs.yawCue(this));
+        yaw.setOnCheckedChangeListener((b, c) -> sp.edit().putBoolean(Prefs.K_YAW, c).apply());
+        mo.addView(ui.row("转弯时使用陀螺仪", "低速转弯（几乎没有离心力）时也有提示", yaw).view, Ui.matchWrap());
+        mo.addView(ui.divider());
+        mo.addView(ui.title("刷新率", 15f));
+        mo.addView(ui.segmented(new String[]{"跟随系统", "尽量最高", "60Hz 省电"}, Prefs.refresh(this),
+                i -> sp.edit().putInt(Prefs.K_REFRESH, i).apply()), top(8));
+        mo.addView(ui.secondary("动画逐帧跟随屏幕当前的刷新率（包括 LTPO 动态变化），运动速度与刷新率无关；"
+                + "圆点静止时暂停绘制，屏幕可以降频省电。"), top(10));
+        content.addView(mo);
 
-        Switch yaw = new Switch(this);
-        yaw.setText("转弯时使用陀螺仪（低速转弯也有反馈）");
-        yaw.setChecked(Prefs.yawCue(this));
-        yaw.setOnCheckedChangeListener((CompoundButton b, boolean c) -> sp.edit().putBoolean(Prefs.K_YAW, c).apply());
-        yaw.setPadding(0, dp(10), 0, dp(4));
-        look.addView(yaw);
-
-        // ---------- 刷新率 ----------
-        LinearLayout hz = card("刷新率");
-        hz.addView(text("动画由屏幕 VSYNC 逐帧驱动，自动跟随当前刷新率（60/90/120Hz 以及 LTPO 动态变化）。"
-                + "运动按真实帧间隔计算，所以刷新率变化时速度不变，只是越高越顺滑。圆点静止时会暂停逐帧绘制，让屏幕可以降频省电。", 13));
-        hz.addView(choice(new String[]{"跟随系统", "尽量最高", "60Hz 省电"}, Prefs.refresh(this),
-                i -> sp.edit().putInt(Prefs.K_REFRESH, i).apply()));
-
-        Switch boot = new Switch(this);
-        boot.setText("开机后自动恢复");
-        boot.setChecked(Prefs.startOnBoot(this));
+        // ---------- 其它 ----------
+        content.addView(ui.sectionHeader("其它"));
+        LinearLayout oc = ui.card();
+        Switch boot = ui.toggle(Prefs.startOnBoot(this));
         boot.setOnCheckedChangeListener((b, c) -> sp.edit().putBoolean(Prefs.K_BOOT, c).apply());
-        boot.setPadding(0, dp(10), 0, dp(4));
-        hz.addView(boot);
+        oc.addView(ui.row("开机后自动恢复", null, boot).view, Ui.matchWrap());
+        oc.addView(ui.divider());
+        TextView chevron = ui.text("›", 22f, pal.textSecondary);
+        Ui.Row app = ui.row("应用详情与耗电设置", "ColorOS：耗电管理 → 允许后台行为、允许自启动", chevron);
+        app.view.setBackground(ui.pressable(pal.surface, 14));
+        app.view.setOnClickListener(v -> openAppDetails());
+        oc.addView(app.view, Ui.matchWrap());
+        TextView tileTip = ui.secondary("提示：在下拉控制中心添加「防晕车圆点」快捷开关，点一下切换 关闭 → 始终显示 → 自动。");
+        oc.addView(tileTip, top(10));
+        content.addView(oc);
 
-        // ---------- 实时 ----------
-        LinearLayout live = card("实时数据");
-        liveText = text("", 13);
+        // ---------- 诊断与说明（默认收起） ----------
+        liveText = ui.text("", 12.5f, pal.textSecondary);
         liveText.setTypeface(Typeface.MONOSPACE);
-        live.addView(liveText);
+        content.addView(ui.collapsible("实时数据", "传感器、刷新率、乘车判断", liveText), top(22));
+        content.addView(ui.collapsible("原理与说明", "感觉冲突理论、传感器融合、参考文献",
+                ui.text(ABOUT, 14f, pal.textSecondary)), top(12));
 
-        // ---------- 说明 ----------
-        LinearLayout about = card("原理与说明");
-        TextView a = text(ABOUT, 13);
-        a.setMovementMethod(LinkMovementMethod.getInstance());
-        about.addView(a);
+        TextView ver = ui.secondary("版本 " + versionName());
+        ver.setGravity(Gravity.CENTER);
+        ver.setTextSize(12f);
+        content.addView(ver, top(20));
+    }
+
+    private Ui.Row permRow(String title, String desc, String action, boolean primary, View.OnClickListener l) {
+        TextView btn = primary ? ui.primaryButton(action, l) : ui.tonalButton(action, l);
+        btn.setTextSize(14f);
+        btn.setPadding(ui.dp(14), ui.dp(7), ui.dp(14), ui.dp(7));
+        Ui.Row r = ui.row(title, desc, btn);
+        permCard.addView(r.view, top(8));
+        return r;
+    }
+
+    private String versionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (PackageManager.NameNotFoundException e) {
+            return "";
+        }
     }
 
     private static final String ABOUT =
-            "• 原理：晕动症主要来自「感觉冲突」——内耳前庭感到加减速和转弯，但眼睛盯着静止的屏幕。"
-                    + "圆点像车里没有固定的小球：加速时往后（下）滑，刹车时往前（上）滑，左转时往右、右转时往左，"
-                    + "用余光就能看到与身体感受一致的运动。\n\n"
-                    + "• 传感器：使用「游戏旋转矢量」（陀螺仪+加速度计融合，不用磁力计，不受车内磁场干扰）估计重力方向，"
-                    + "把加速度投影到水平面得到车辆加速度；陀螺仪给出转弯角速度。手机平放、斜拿、竖拿、横屏都会自动换算。\n\n"
-                    + "• 滤波：晕车最敏感的频段约 0.1–0.5Hz，车辆操控通常低于 1Hz，所以用 1.2Hz 低通去掉路面颠簸和手抖；"
-                    + "自适应去偏消除传感器零漂；检测到你在晃动/转动手机时会暂时压低反馈。\n\n"
-                    + "• 自动模式：国行系统没有 Google 的活动识别，这里用振动、步频、车辆操控三个特征自行判断，"
-                    + "约 15 秒确认上车，走路会很快退出。如不准确请用「始终显示」或快捷开关。\n\n"
-                    + "• 限制：普通应用的悬浮窗无法盖在锁屏和部分系统界面上；Android 12+ 悬浮窗不透明度最高 80%。"
-                    + "仅供乘客使用，驾驶时请勿看手机。\n\n"
-                    + "• 参考：Apple iOS 18「车辆运动提示」；Google Android「Motion Assist」；"
-                    + "Hanau & Popescu, MotionReader (AutomotiveUI 2017)；Karjanto 等，周边视觉信息系统与自动驾驶晕动症 "
-                    + "(Transportation Research Part F, 2018)；Reason & Brand 感觉冲突理论 (1975)；"
-                    + "Golding, 晕动症频率特性 (ISO 2631 / 2006)。";
+            "圆点像车里没有固定住的小球：加速时往后（下）滑，刹车时往前（上）滑，左转时往右、右转时往左。"
+                    + "晕动症主要来自「感觉冲突」——内耳前庭感到加减速和转弯，眼睛却盯着静止的屏幕；"
+                    + "余光里与身体感受一致的运动可以减轻这种冲突。\n\n"
+                    + "传感器：用「游戏旋转矢量」（陀螺仪 + 加速度计融合，不用磁力计，不受车内磁场干扰）估计竖直方向，"
+                    + "把屏幕的右方、上方投影到水平面，加速度在这两个方向上的分量就是提示量；"
+                    + "手机平放、斜拿、竖拿、横屏、躺着举在脸上方都一致正确。\n\n"
+                    + "滤波：晕车最敏感的频段约 0.1–0.5Hz，车辆操控通常低于 1Hz，所以低通滤掉路面颠簸和手抖，"
+                    + "再用超前补偿抵消滤波延迟；轻微的加减速也会被适度放大，急刹不会冲得太远。\n\n"
+                    + "自动模式：国行系统没有 Google 的活动识别，这里用振动、步频、车辆操控三个特征自行判断，"
+                    + "约 15 秒确认上车，走路会退出。不准确时请用「始终显示」或快捷开关。\n\n"
+                    + "限制：普通应用的悬浮窗无法盖在锁屏和部分系统界面上。仅供乘客使用，驾驶时请勿看手机。\n\n"
+                    + "参考：Apple iOS 18「车辆运动提示」；Google Android「Motion Assist」；"
+                    + "Hanau & Popescu, MotionReader (AutomotiveUI 2017)；Karjanto 等 (Transportation Research Part F, 2018)；"
+                    + "Reason & Brand, Motion Sickness (1975)；Golding (2006)；ISO 2631-1。";
 
-    private LinearLayout card(String title) {
-        LinearLayout c = new LinearLayout(this);
-        c.setOrientation(LinearLayout.VERTICAL);
-        c.setPadding(dp(16), dp(14), dp(16), dp(14));
-        GradientDrawable bg = new GradientDrawable();
-        bg.setCornerRadius(dp(16));
-        boolean night = (getResources().getConfiguration().uiMode
-                & android.content.res.Configuration.UI_MODE_NIGHT_MASK)
-                == android.content.res.Configuration.UI_MODE_NIGHT_YES;
-        bg.setColor(night ? 0x14FFFFFF : 0x0D000000);
-        c.setBackground(bg);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(14);
-        root.addView(c, lp);
-        TextView t = new TextView(this);
-        t.setText(title);
-        t.setTextSize(17);
-        t.setTypeface(Typeface.DEFAULT_BOLD);
-        t.setPadding(0, 0, 0, dp(6));
-        c.addView(t);
-        return c;
-    }
+    // =============================== 开关与模式 ===============================
 
-    private TextView text(String s, float size) {
-        TextView t = new TextView(this);
-        t.setText(s);
-        t.setTextSize(size);
-        t.setLineSpacing(0, 1.15f);
-        t.setPadding(0, dp(4), 0, dp(4));
-        return t;
-    }
-
-    private TextView label(String s) {
-        TextView t = text(s, 14);
-        t.setPadding(0, dp(10), 0, 0);
-        t.setTypeface(Typeface.DEFAULT_BOLD);
-        return t;
-    }
-
-    private Button button(String s, View.OnClickListener l) {
-        Button b = new Button(this);
-        b.setText(s);
-        b.setAllCaps(false);
-        b.setOnClickListener(l);
-        return b;
-    }
-
-    private void addRadio(RadioGroup g, int id, String text) {
-        RadioButton rb = new RadioButton(this);
-        rb.setId(View.generateViewId());
-        // 界面每次都按当前设置重建；不让系统在进程重建后恢复旧的勾选状态（会把模式改回旧值）
-        rb.setSaveEnabled(false);
-        rb.setText(text);
-        rb.setTag(id);
-        rb.setPadding(dp(4), dp(6), 0, dp(6));
-        g.addView(rb);
-    }
-
-    interface IntFmt { String fmt(int p); }
-    interface IntSink { void put(int p); }
-
-    private void addSlider(LinearLayout parent, String name, int min, int max, int value, IntFmt fmt, IntSink sink) {
-        TextView t = label(name + "：" + fmt.fmt(value));
-        parent.addView(t);
-        SeekBar sb = new SeekBar(this);
-        sb.setMax(max - min);
-        sb.setProgress(Math.max(0, Math.min(max - min, value - min)));
-        sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            private boolean tracking;
-
-            @Override
-            public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
-                t.setText(name + "：" + fmt.fmt(p + min));
-                // 拖动过程中只更新文字，松手再保存（尺寸/数量/透明度会重建或更新悬浮窗，逐帧保存会闪烁）；
-                // 键盘 / 无障碍调整没有拖动过程，直接保存
-                if (fromUser && !tracking) sink.put(p + min);
-            }
-
-            @Override
-            public void onStartTrackingTouch(SeekBar s) {
-                tracking = true;
-            }
-
-            @Override
-            public void onStopTrackingTouch(SeekBar s) {
-                tracking = false;
-                sink.put(s.getProgress() + min);
-            }
-        });
-        parent.addView(sb);
-    }
-
-    private RadioGroup choice(String[] labels, int selected, IntSink sink) {
-        RadioGroup g = new RadioGroup(this);
-        g.setOrientation(RadioGroup.HORIZONTAL);
-        int[] ids = new int[labels.length];
-        for (int i = 0; i < labels.length; i++) {
-            RadioButton rb = new RadioButton(this);
-            ids[i] = View.generateViewId();
-            rb.setId(ids[i]);
-            rb.setSaveEnabled(false);
-            rb.setText(labels[i]);
-            rb.setPadding(0, 0, dp(12), 0);
-            g.addView(rb);
+    private void onMasterToggled(boolean on) {
+        if (on) {
+            int m = Prefs.lastOnMode(this);
+            if (!Settings.canDrawOverlays(this)) openOverlaySettings();
+            else if (m == Prefs.MODE_AUTO) maybeAskStepPermission();
+            Prefs.setMode(this, m);
+            MotionService.sync(this);
+        } else {
+            Prefs.setMode(this, Prefs.MODE_OFF);
         }
-        g.check(ids[Math.max(0, Math.min(labels.length - 1, selected))]);
-        g.setOnCheckedChangeListener((grp, id) -> {
-            for (int i = 0; i < ids.length; i++) if (ids[i] == id) sink.put(i);
-        });
-        return g;
+        syncModeUi();
     }
 
-    // =============================== 状态 ===============================
-
-    private int radioIdForMode(int mode) {
-        for (int i = 0; i < modeGroup.getChildCount(); i++) {
-            View v = modeGroup.getChildAt(i);
-            if (Integer.valueOf(mode).equals(v.getTag())) return v.getId();
+    private void onModeChosen(int m) {
+        Prefs.setLastOnMode(this, m);
+        if (Prefs.mode(this) != Prefs.MODE_OFF) {
+            Prefs.setMode(this, m);
+            if (m == Prefs.MODE_AUTO) maybeAskStepPermission();
+            MotionService.sync(this);
         }
-        return View.NO_ID;
+        syncModeUi();
     }
 
-    private void syncModeRadio() {
-        suppressModeEvents = true;
-        modeGroup.check(radioIdForMode(Prefs.mode(this)));
-        suppressModeEvents = false;
+    private void maybeAskStepPermission() {
+        if (Build.VERSION.SDK_INT >= 29 && !granted(Manifest.permission.ACTIVITY_RECOGNITION)) {
+            requestPermissions(new String[]{Manifest.permission.ACTIVITY_RECOGNITION}, REQ_PERMS);
+        }
     }
+
+    private void syncModeUi() {
+        if (master == null) return;
+        syncing = true;
+        int mode = Prefs.mode(this);
+        boolean on = mode != Prefs.MODE_OFF;
+        if (master.isChecked() != on) master.setChecked(on);
+        int shown = on ? mode : Prefs.lastOnMode(this);
+        modeSeg.select(shown == Prefs.MODE_AUTO ? 0 : 1, false);
+        modeSeg.setEnabled(on);
+        String status;
+        if (!on) {
+            status = "已关闭";
+        } else if (!Settings.canDrawOverlays(this)) {
+            status = "需要先开启悬浮窗权限";
+        } else if (LiveStats.demoActive) {
+            status = "演示中";
+        } else if (mode == Prefs.MODE_AUTO) {
+            status = LiveStats.inVehicle ? "已开启 · 检测到乘车，正在显示" : "已开启 · 等待检测到乘车";
+        } else {
+            status = "已开启 · 始终显示";
+        }
+        masterRow.subtitle.setText(status);
+        masterRow.subtitle.setVisibility(View.VISIBLE);
+        masterRow.subtitle.setTextColor(on && !Settings.canDrawOverlays(this) ? pal.warning : pal.textSecondary);
+        modeHint.setText(shown == Prefs.MODE_AUTO
+                ? "检测到坐车约 15 秒后自动显示，走路时自动隐藏（实验性）。"
+                : "开启后一直显示，最可靠。");
+        syncing = false;
+    }
+
+    private void demo() {
+        if (!Settings.canDrawOverlays(this)) {
+            openOverlaySettings();
+            return;
+        }
+        MotionService.start(this, MotionService.ACTION_DEMO);
+    }
+
+    // =============================== 权限 ===============================
 
     private boolean granted(String perm) {
         return checkSelfPermission(perm) == PackageManager.PERMISSION_GRANTED;
     }
 
-    private void refreshPermissionState() {
+    private void refreshPermissions() {
         boolean overlay = Settings.canDrawOverlays(this);
         boolean notif = Build.VERSION.SDK_INT < 33 || granted(Manifest.permission.POST_NOTIFICATIONS);
         boolean step = Build.VERSION.SDK_INT < 29 || granted(Manifest.permission.ACTIVITY_RECOGNITION);
         PowerManager pm = getSystemService(PowerManager.class);
         boolean battery = pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
-        overlayBtn.setVisibility(overlay ? View.GONE : View.VISIBLE);
-        notifBtn.setVisibility(notif ? View.GONE : View.VISIBLE);
-        stepBtn.setVisibility(step ? View.GONE : View.VISIBLE);
-        batteryBtn.setVisibility(battery ? View.GONE : View.VISIBLE);
-        statusText.setText(
-                (overlay ? "✓" : "✗") + " 悬浮窗\n"
-                        + (notif ? "✓" : "✗") + " 通知\n"
-                        + (step ? "✓" : "–") + " 身体活动（计步）\n"
-                        + (battery ? "✓" : "–") + " 不限制后台耗电");
-        statusText.setGravity(Gravity.START);
+        permOverlay.view.setVisibility(overlay ? View.GONE : View.VISIBLE);
+        permNotif.view.setVisibility(notif ? View.GONE : View.VISIBLE);
+        permStep.view.setVisibility(step ? View.GONE : View.VISIBLE);
+        permBattery.view.setVisibility(battery ? View.GONE : View.VISIBLE);
+        permCard.setVisibility(overlay && notif && step && battery ? View.GONE : View.VISIBLE);
+    }
+
+    private void openOverlaySettings() {
+        startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName())));
+    }
+
+    private void openBatterySettings() {
+        try {
+            startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:" + getPackageName())));
+        } catch (RuntimeException e) {
+            startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+        }
+    }
+
+    private void openAppDetails() {
+        startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName())));
     }
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
-        refreshPermissionState();
+        refreshPermissions();
         if (Prefs.mode(this) != Prefs.MODE_OFF) MotionService.start(this, MotionService.ACTION_APPLY);
     }
+
+    // =============================== 实时数据 ===============================
 
     private String supportedRates(Display d) {
         TreeSet<Integer> set = new TreeSet<>();
@@ -409,8 +460,6 @@ public final class MainActivity extends Activity {
     }
 
     private void updateLive() {
-        int want = radioIdForMode(Prefs.mode(this));
-        if (modeGroup.getCheckedRadioButtonId() != want) syncModeRadio();
         DisplayManager dm = getSystemService(DisplayManager.class);
         Display d = dm.getDisplay(Display.DEFAULT_DISPLAY);
         String sensors = LiveStats.sensorInfo;
@@ -437,7 +486,7 @@ public final class MainActivity extends Activity {
                     LiveStats.accelForward, LiveStats.accelRight, LiveStats.yawRate,
                     (1 - LiveStats.handlingGain) * 100));
             sb.append(String.format(Locale.US,
-                    "\n乘车判断：%s（分数 %.1f / 进入≥8）\n振动 %.3f · 步频能量 %.2f · 步频周期 %.2f · 操控 %.2f",
+                    "\n乘车判断：%s（分数 %.1f / 进入≥8）\n振动 %.3f · 步频能量 %.2f\n步频周期 %.2f · 操控 %.2f",
                     LiveStats.inVehicle ? "在车上" : "不在车上", LiveStats.vehicleScore,
                     LiveStats.vibRms, LiveStats.walkRms, LiveStats.walkPeriodicity, LiveStats.motionRms));
         }

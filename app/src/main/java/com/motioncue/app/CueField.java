@@ -2,8 +2,6 @@ package com.motioncue.app;
 
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.Color;
-import android.graphics.Paint;
 import android.graphics.Rect;
 import android.os.Handler;
 import android.os.Looper;
@@ -34,36 +32,35 @@ final class CueField implements Choreographer.FrameCallback {
         void onFadedOut();
     }
 
-    private static final float SUBSTEP = 0.002f;
-    private static final float SPRING_W = 11f;   // 弹簧角频率（rad/s），临界阻尼
     private static final float MAX_DT = 0.5f;    // 低于 2Hz 的帧间隔才会被截断
-    private static final float FADE_S = 0.35f;
+    private static final float FADE_S = 0.4f;
 
     private final Context ctx;
     private final MotionEngine engine;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Choreographer choreographer = Choreographer.getInstance();
     private final ArrayList<View> views = new ArrayList<>();
-    private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final DotStyle style = new DotStyle();
+    private final float dp1;
     private Callback callback;
 
     // 设置（传感器线程也会读，所以用 volatile）
     private volatile float sensitivity = 1f;
     private volatile boolean yawCue = true;
-    private float dotR = 12f;
-    private float strokeW = 3f;
+    private float dotR = 12f;               // 设置的半径（px）
     private int dotCount = 9;
     private int layout = Prefs.LAYOUT_SIDES;
     private int colorMode = Prefs.COLOR_AUTO;
+    private int accent;
 
     // 几何（屏幕坐标，像素）
     private final CueGeometry geo = new CueGeometry();
     private int screenW, screenH;
     private final DrawSink drawSink = new DrawSink();
 
-    // 物理状态（主线程）
-    private float px, py, vx, vy;
+    // 物理状态（主线程）：{px, py, vx, vy}
+    private final float[] st = new float[4];
+    private float activity;                 // 运动强调 0..1
     private float fade, fadeTarget;
     private long lastFrameNs;
     private boolean running;
@@ -77,8 +74,7 @@ final class CueField implements Choreographer.FrameCallback {
     CueField(Context ctx, MotionEngine engine) {
         this.ctx = ctx;
         this.engine = engine;
-        fill.setStyle(Paint.Style.FILL);
-        stroke.setStyle(Paint.Style.STROKE);
+        this.dp1 = dp(1f);
     }
 
     void setCallback(Callback cb) { callback = cb; }
@@ -96,20 +92,7 @@ final class CueField implements Choreographer.FrameCallback {
         dotCount = Prefs.dotCount(ctx);
         layout = Prefs.layout(ctx);
         colorMode = Prefs.color(ctx);
-        switch (colorMode) {
-            case Prefs.COLOR_WHITE:
-                fill.setColor(Color.WHITE);
-                break;
-            case Prefs.COLOR_BLACK:
-                fill.setColor(Color.BLACK);
-                break;
-            default:
-                fill.setColor(0xFFF2F2F2);
-                stroke.setColor(0xFF000000);
-                break;
-        }
-        strokeW = colorMode == Prefs.COLOR_AUTO ? Math.max(1f, dp(1.2f)) : 0f;
-        stroke.setStrokeWidth(strokeW);
+        accent = Palette.dotAccent(ctx);
         computeGeometry();
         invalidateViews();
         startFrames();
@@ -125,8 +108,21 @@ final class CueField implements Choreographer.FrameCallback {
     }
 
     private void computeGeometry() {
-        float margin = dotR + strokeW + dp(2);
-        geo.compute(screenW, screenH, dotCount, layout, dotR, strokeW, margin, (int) Math.ceil(margin));
+        // 先按设置的半径算出点的最大绘制范围（放大 + 描边 + 尾迹），决定边距和窗口外扩
+        boolean dark = isDarkTheme();
+        style.configure(colorMode, dotR, dp1, accent, dark);
+        float halo = style.haloWidth();
+        float body = dotR * DotStyle.MAX_SCALE + halo + dp(2);   // 圆点本体（放大 + 光晕）
+        // 窗口只需容纳圆点本体：遮罩内侧边界处的点已几乎透明，尾迹被窗口裁掉也看不出来，窗口更窄、遮挡更少
+        geo.compute(screenW, screenH, dotCount, layout, dotR, halo, body, (int) Math.ceil(body));
+        geo.setDrawPad(style.maxExtent() + dp(2));
+        // 点很密时几何会缩小实际半径
+        style.configure(colorMode, geo.dotR, dp1, accent, dark);
+    }
+
+    private boolean isDarkTheme() {
+        return (ctx.getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK)
+                == android.content.res.Configuration.UI_MODE_NIGHT_YES;
     }
 
     /** 当前布局需要的悬浮窗矩形（屏幕坐标），互不重叠。 */
@@ -171,32 +167,20 @@ final class CueField implements Choreographer.FrameCallback {
 
     /** 窗口重新出现时从静止位置开始，不带上次隐藏前的位移。 */
     void resetMotion() {
-        px = py = vx = vy = 0f;
+        st[0] = st[1] = st[2] = st[3] = 0f;
+        activity = 0f;
         fade = 0f;
     }
 
     // ---------------- 目标位移 ----------------
 
-    private float maxDisp() {
-        return dp(58f) * (float) Math.sqrt(Math.max(0.25f, sensitivity));
-    }
-
     /** 车辆运动 → 圆点位移（像车里没固定的小球：加速往后、刹车往前、左转往右）。 */
     private float targetX() {
-        float s = sensitivity;
-        float g = dp(18f) * s;     // px / (m/s²)
-        float yg = dp(80f) * s;    // px / (rad/s)
-        float t = -engine.outRight * g + (yawCue ? engine.outYaw * yg : 0f);
-        return softClamp(t, maxDisp());
+        return CueResponse.targetX(engine.outRight, engine.outYaw, sensitivity, yawCue, dp1);
     }
 
     private float targetY() {
-        float g = dp(18f) * sensitivity;
-        return softClamp(engine.outForward * g, maxDisp());
-    }
-
-    private static float softClamp(float v, float max) {
-        return max * (float) Math.tanh(v / max);
+        return CueResponse.targetY(engine.outForward, sensitivity, dp1);
     }
 
     /** 传感器线程调用：静止状态下，如果目标位置明显改变就唤醒动画。 */
@@ -241,20 +225,8 @@ final class CueField implements Choreographer.FrameCallback {
         lastFrameNs = frameTimeNanos;
 
         float tx = targetX(), ty = targetY();
-
-        // 临界阻尼弹簧，固定子步长 → 与刷新率无关
-        float w2 = SPRING_W * SPRING_W, c = 2f * SPRING_W;
-        float rem = dt;
-        while (rem > 1e-6f) {
-            float h = Math.min(SUBSTEP, rem);
-            float ax = w2 * (tx - px) - c * vx;
-            float ay = w2 * (ty - py) - c * vy;
-            vx += ax * h;
-            vy += ay * h;
-            px += vx * h;
-            py += vy * h;
-            rem -= h;
-        }
+        CueResponse.springStep(st, tx, ty, dt);
+        activity = CueResponse.activity(activity, (float) Math.hypot(st[2], st[3]), dp1, dt);
 
         float fs = dt / FADE_S;
         if (fade < fadeTarget) fade = Math.min(fadeTarget, fade + fs);
@@ -269,9 +241,9 @@ final class CueField implements Choreographer.FrameCallback {
             if (callback != null) callback.onFadedOut();
             return;
         }
-        boolean settled = Math.abs(tx - px) < 0.3f && Math.abs(ty - py) < 0.3f
-                && Math.abs(vx) < 2f && Math.abs(vy) < 2f && fade == fadeTarget
-                && !engine.demoActive();
+        boolean settled = Math.abs(tx - st[0]) < 0.3f && Math.abs(ty - st[1]) < 0.3f
+                && Math.abs(st[2]) < 2f && Math.abs(st[3]) < 2f && activity < 0.01f
+                && fade == fadeTarget && !engine.demoActive();
         if (settled) {
             // 停止逐帧回调，等待传感器唤醒（先写目标再置 idle，传感器线程据此比较）
             idleTx = tx;
@@ -288,12 +260,13 @@ final class CueField implements Choreographer.FrameCallback {
     /** 由各窗口的 onDraw 调用：把屏幕坐标的点阵画进窗口（窗口左上角在屏幕上的位置为 ox, oy）。 */
     void draw(Canvas canvas, int ox, int oy, int vw, int vh) {
         if (fade <= 0f) return;
+        style.beginFrame(CueResponse.scaleFor(activity), CueResponse.alphaFor(activity));
         DrawSink d = drawSink;
         d.canvas = canvas;
         d.ox = ox;
         d.oy = oy;
-        d.stroke = strokeW > 0f;
-        geo.forEachDot(ox, oy, ox + vw, oy + vh, px, py, d);
+        d.fadeA = CueResponse.ease(fade);
+        geo.forEachDot(ox, oy, ox + vw, oy + vh, st[0], st[1], d);
         d.canvas = null;
     }
 
@@ -301,20 +274,11 @@ final class CueField implements Choreographer.FrameCallback {
     private final class DrawSink implements CueGeometry.DotSink {
         Canvas canvas;
         int ox, oy;
-        boolean stroke;
+        float fadeA;
 
         @Override
         public void dot(float x, float y, float alpha) {
-            float a = alpha * fade;
-            if (a <= 0.004f) return;
-            float cx = x - ox, cy = y - oy;
-            float r = geo.dotR;
-            fill.setAlpha(Math.round(255 * a));
-            canvas.drawCircle(cx, cy, r, fill);
-            if (stroke) {
-                CueField.this.stroke.setAlpha(Math.round(0xCC * a));
-                canvas.drawCircle(cx, cy, r, CueField.this.stroke);
-            }
+            style.draw(canvas, x - ox, y - oy, st[2], st[3], alpha * fadeA);
         }
     }
 }

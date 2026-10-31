@@ -36,10 +36,13 @@ public final class MotionEngine implements SensorEventListener {
     private static final int SAMPLE_US = 10_000; // 100Hz，足够覆盖 120Hz 屏幕（渲染层还有弹簧插值）
 
     // 滤波参数
-    private static final float ACC_LP_HZ = 1.2f;
-    private static final float YAW_LP_HZ = 1.0f;
-    private static final float ACC_DEADZONE = 0.07f;  // m/s²
-    private static final float YAW_DEADZONE = 0.02f;  // rad/s
+    private static final float ACC_LP_HZ = 1.5f;
+    // 偏航用更低的截止频率：车辆转弯持续数秒（< 0.3Hz），手的晃动多在 0.3–1Hz，滤掉后手持时圆点不会左右晃
+    private static final float YAW_LP_HZ = 0.6f;
+    /** 超前补偿（秒）：抵消低通滤波的延迟，让圆点和身体感受到的加减速更同步 */
+    private static final float LEAD_S = 0.08f;
+    private static final float ACC_DEADZONE = 0.08f;  // m/s²
+    private static final float YAW_DEADZONE = 0.04f;  // rad/s（城市转弯 0.2–0.5 rad/s 不受影响）
     /** 屏幕轴水平投影长度低于此值时，该方向的提示增益开始减小 */
     private static final float AXIS_MIN = 0.35f;
 
@@ -76,6 +79,7 @@ public final class MotionEngine implements SensorEventListener {
     private volatile int displayRotation = Surface.ROTATION_0;
 
     private float f1, f2, r1, r2;       // 两级低通
+    private float prevF, prevR;         // 上一样本（求导做超前补偿）
     private float fBias, rBias;
     private float y1, y2, yBias;
     private float gyroLpX, gyroLpY, gyroLpZ, gyroHfPow;
@@ -176,6 +180,7 @@ public final class MotionEngine implements SensorEventListener {
         lastAccNs = 0;
         lastGyroNs = 0;
         f1 = f2 = r1 = r2 = 0;
+        prevF = prevR = 0;
         y1 = y2 = 0;
         fBias = rBias = yBias = 0;
         gyroLpX = gyroLpY = gyroLpZ = 0;
@@ -292,11 +297,18 @@ public final class MotionEngine implements SensorEventListener {
 
         // ---- 手持晃动抑制：快速压低，1 秒恢复 ----
         float hfRms = (float) Math.sqrt(gyroHfPow);
-        float targetH = 1f - smoothstep(0.35f, 1.2f, hfRms);
+        // 车里手持时路面振动也会带来一些高频角速度，门槛放宽，只压制明显的拿起 / 转动手机
+        float targetH = 1f - smoothstep(0.5f, 1.5f, hfRms);
         handling += (targetH - handling) * (targetH < handling ? alphaTau(dt, 0.05f) : alphaTau(dt, 1.0f));
 
-        float outF = softDeadzone(fwdA, ACC_DEADZONE) * handling;
-        float outR = softDeadzone(rightA, ACC_DEADZONE) * handling;
+        // 超前补偿：x + τ·dx/dt（信号已两级低通，导数很平滑）
+        float fLead = fwdA + LEAD_S * (fwdA - prevF) / dt;
+        float rLead = rightA + LEAD_S * (rightA - prevR) / dt;
+        prevF = fwdA;
+        prevR = rightA;
+
+        float outF = softDeadzone(fLead, ACC_DEADZONE) * handling;
+        float outR = softDeadzone(rLead, ACC_DEADZONE) * handling;
         float yawOut = softDeadzone(yawR, YAW_DEADZONE) * handling;   // 车辆偏航（+ = 左转）
         float outY = yawOut * yawToScreenX;                           // 映射到屏幕 x 方向
 
@@ -329,6 +341,7 @@ public final class MotionEngine implements SensorEventListener {
         LiveStats.accelForward = outF;
         LiveStats.accelRight = outR;
         LiveStats.yawRate = yawOut;
+        LiveStats.yawScreen = outY;
         LiveStats.handlingGain = handling;
 
         Listener l = listener;

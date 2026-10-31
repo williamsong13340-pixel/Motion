@@ -21,16 +21,18 @@ final class CueGeometry {
 
     int screenW, screenH;
     int layout = Prefs.LAYOUT_SIDES;
-    float dotR, strokeW;   // dotR：实际绘制半径（可能比设置的小，见 compute）
+    float dotR, strokeW;   // dotR：实际绘制半径（可能比设置的小，见 compute）；strokeW：光晕宽度
     float sx, sy, half, x0, y0;
     float sideFull, sideZero, tbFull, tbZero;
     private int pad;
+    private float drawPad;              // 枚举点时的外扩（含尾迹），可大于窗口外扩
     private boolean fullScreenWindow;   // 只用一个全屏窗口（网格布局，或边缘带太宽）
     private boolean topBottom;          // 「四周」布局里上下边带是否有窗口
 
     /**
-     * @param minEdgePx 最外列与屏幕边缘的最小距离（通常为半径 + 描边 + 2dp）
-     * @param pad       窗口在遮罩可见范围外额外留出的边距（半径 + 描边 + 余量）
+     * @param strokeW   圆芯外的光晕宽度
+     * @param minEdgePx 最外列与屏幕边缘的最小距离（通常为放大后的半径 + 光晕 + 2dp）
+     * @param pad       窗口在遮罩可见范围外额外留出的边距（点的最大绘制范围 + 余量）
      */
     void compute(int w, int h, int dotCount, int layout, float dotR, float strokeW, float minEdgePx, int pad) {
         this.screenW = w;
@@ -43,7 +45,8 @@ final class CueGeometry {
         float minDim = Math.min(w, h);
         int n = Math.max(4, Math.min(16, dotCount));
         float s = minDim / n;                                    // 行内间距
-        float edge = Math.max(minDim * 0.04f, minEdgePx);         // 最外列离屏幕边缘的距离
+        // 最外列离屏幕边缘的距离：尽量落在一般 App 的 16dp 页边距里，少压正文
+        float edge = Math.max(minDim * 0.025f, minEdgePx);
 
         // 左右两侧的点列关于屏幕中线对称：两侧最外列之间正好是偶数个半间距
         int kx = Math.max(2, Math.round((w - 2 * edge) / (s / 2f)));
@@ -73,6 +76,9 @@ final class CueGeometry {
         fullScreenWindow = layout == Prefs.LAYOUT_GRID || sideW * 2 >= w;
         topBottom = !fullScreenWindow && layout == Prefs.LAYOUT_FRAME && tbH * 2 < h && w - 2 * sideW > 0;
     }
+
+    /** 点的最大绘制范围（含放大、光晕、尾迹）：跨窗口边界的点两边都要画到 */
+    void setDrawPad(float px) { drawPad = px; }
 
     private int sideWidth() { return (int) Math.ceil(sideZero) + pad; }
 
@@ -145,7 +151,8 @@ final class CueGeometry {
      */
     void forEachDot(float left, float top, float right, float bottom, float dx, float dy, DotSink sink) {
         if (sx <= 0f || sy <= 0f) return;
-        float pad = dotR + strokeW;
+        // 外扩 = 点的最大绘制范围（放大、光晕、尾迹），保证跨窗口边界的点两边都画到
+        float pad = Math.max(drawPad, Math.max(this.pad, dotR + strokeW));
         float gx0 = left - pad, gx1 = right + pad;
         float gy0 = top - pad, gy1 = bottom + pad;
         int jMin = (int) Math.floor((gy0 - y0 - dy) / sy);

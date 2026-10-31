@@ -12,6 +12,7 @@ public final class LiveStats {
     public static volatile float accelForward;  // m/s²，正 = 加速
     public static volatile float accelRight;    // m/s²，正 = 向右的加速度（左转时为负）
     public static volatile float yawRate;       // rad/s，正 = 左转
+    public static volatile float yawScreen;     // 偏航映射到屏幕 x 方向（rad/s），供 App 内预览使用
     public static volatile float handlingGain;  // 0..1，手持晃动时降低
 
     // 乘车检测
