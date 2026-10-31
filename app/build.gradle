@@ -1,0 +1,45 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.motioncue.app'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.motioncue.app'
+        minSdk 26
+        targetSdk 35
+        // CI 传入 run number，保证每次构建版本号递增、可以覆盖安装
+        versionCode Integer.parseInt(System.getenv('VERSION_CODE') ?: '1')
+        versionName "1.0." + (System.getenv('VERSION_CODE') ?: '0')
+    }
+
+    signingConfigs {
+        // 固定签名：每次 CI 构建的 APK 签名一致，可直接覆盖升级。
+        // 如需私有签名，在仓库 Secrets 中配置 KEYSTORE_BASE64 / KEYSTORE_PASSWORD 等即可覆盖。
+        release {
+            storeFile file(System.getenv('KEYSTORE_FILE') ?: 'motioncue.keystore')
+            storePassword System.getenv('KEYSTORE_PASSWORD') ?: 'motioncue'
+            keyAlias System.getenv('KEY_ALIAS') ?: 'motioncue'
+            keyPassword System.getenv('KEY_PASSWORD') ?: 'motioncue'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
+            signingConfig signingConfigs.release
+        }
+        debug {
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

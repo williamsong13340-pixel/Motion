@@ -1,0 +1,47 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Build release APK
+        env:
+          VERSION_CODE: ${{ github.run_number }}
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleRelease
+          mkdir -p out
+          cp app/build/outputs/apk/release/app-release.apk out/MotionCue-v1.0.${{ github.run_number }}.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MotionCue-apk
+          path: out/*.apk
+
+      - name: Publish release (download on phone)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: 乘车动态提示 v1.0.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          files: out/*.apk
+          body: |
+            分支 `${{ github.ref_name }}` 自动构建（${{ github.sha }}）。
+            手机浏览器下载下面的 APK 直接安装即可；签名固定，后续版本可直接覆盖安装。
