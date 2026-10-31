@@ -7,6 +7,7 @@ import android.hardware.SensorManager;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Process;
+import android.os.SystemClock;
 import android.view.Surface;
 
 /**
@@ -14,11 +15,11 @@ import android.view.Surface;
  *
  * 思路（与 iOS Vehicle Motion Cues / Android Motion Assist 一致，基于感觉冲突理论）：
  *  1. 用 GAME_ROTATION_VECTOR（陀螺仪 + 加速度计融合，不受车内磁场干扰）得到「竖直向上」方向 u。
- *  2. 把加速度投影到水平面，就自动去掉了重力，只剩车辆的水平加速度（加减速 + 转弯离心）。
- *  3. 用屏幕朝向定义「前方」f（屏幕上方/屏幕背面在水平面的投影）和「右方」r = f × u。
- *  4. 角速度在 u 上的投影就是车辆的偏航角速度（转弯）。
- *  5. 低通滤波（晕动症敏感频段约 0.1–0.5Hz，车辆操控 < 1Hz）滤掉路面颠簸和手抖；
- *     慢速去偏（自适应），软死区，手持晃动抑制。
+ *  2. 「右方」r = 屏幕右方在水平面上的投影；「前方」f = u × r（屏幕上方对应前方，像车头朝上的地图）。
+ *     r、f 都在水平面内，所以加速度与它们点乘就自动去掉了重力，只剩车辆的水平加速度。
+ *  3. 角速度在 u 上的投影就是车辆的偏航角速度（转弯）。
+ *  4. 低通滤波（晕动症敏感频段约 0.1–0.5Hz，车辆操控 < 1Hz）滤掉路面颠簸和手抖；
+ *     有门限的慢速去偏（只吸收小的零漂/姿态误差，不吞掉真实的长时间加速），软死区，手持晃动抑制。
  *
  * 全部在独立的 HandlerThread 上运行，输出写入 volatile 字段，渲染线程直接读取。
  */
@@ -36,10 +37,16 @@ public final class MotionEngine implements SensorEventListener {
     // 滤波参数
     private static final float ACC_LP_HZ = 1.2f;
     private static final float YAW_LP_HZ = 1.0f;
-    private static final float ACC_BIAS_TAU = 20f;
-    private static final float YAW_BIAS_TAU = 30f;
     private static final float ACC_DEADZONE = 0.07f;  // m/s²
     private static final float YAW_DEADZONE = 0.02f;  // rad/s
+
+    // 去偏：只学习小偏差（传感器零漂、约 2° 以内的姿态误差），真实的持续加速/弯道不会被吸收
+    private static final float ACC_BIAS_TAU = 30f;
+    private static final float ACC_BIAS_GATE_LO = 0.20f, ACC_BIAS_GATE_HI = 0.35f;
+    private static final float ACC_BIAS_MAX = 0.40f;
+    private static final float YAW_BIAS_TAU = 30f;
+    private static final float YAW_BIAS_GATE_LO = 0.02f, YAW_BIAS_GATE_HI = 0.05f;
+    private static final float YAW_BIAS_MAX = 0.03f;
 
     private final SensorManager sm;
     private final VehicleDetector detector = new VehicleDetector();
@@ -47,7 +54,7 @@ public final class MotionEngine implements SensorEventListener {
 
     private HandlerThread thread;
     private Handler handler;
-    private Sensor accSensor, gyroSensor, rotSensor, stepSensor;
+    private final Sensor accSensor, gyroSensor, rotSensor, stepSensor;
     private boolean useStep;
 
     // 输出（渲染线程读取）
@@ -57,7 +64,8 @@ public final class MotionEngine implements SensorEventListener {
     private final float[] rotM = new float[9];
     private final float[] u = {0, 0, 1};        // 竖直向上方向（设备坐标）
     private boolean haveUp;
-    private final float[] fwd = {0, 1, 0};
+    private final float[] fwd = {0, 1, 0};      // 水平前方（设备坐标）
+    private final float[] right = {1, 0, 0};    // 水平右方（设备坐标）
     private final float[] gyro = new float[3];
     private boolean haveGyro;
     private long lastAccNs, lastGyroNs;
@@ -67,19 +75,20 @@ public final class MotionEngine implements SensorEventListener {
     private float fBias, rBias;
     private float y1, y2, yBias;
     private float gyroLpX, gyroLpY, gyroLpZ, gyroHfPow;
-    private float handling = 1f;
+    private float handling;
     private boolean lastVehicle;
 
     // 演示模式
     private volatile long demoUntilMs;
-    private long demoStartMs;
+    private volatile long demoStartMs;
 
     public MotionEngine(SensorManager sm) {
         this.sm = sm;
         accSensor = sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
         gyroSensor = sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
-        rotSensor = sm.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR);
-        if (rotSensor == null) rotSensor = sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
+        Sensor rot = sm.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR);
+        if (rot == null) rot = sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
+        rotSensor = rot;
         stepSensor = sm.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR);
     }
 
@@ -109,26 +118,31 @@ public final class MotionEngine implements SensorEventListener {
 
     public void setListener(Listener l) { listener = l; }
 
-    public void setUseStepDetector(boolean use) { useStep = use; }
+    /** 计步器（区分走路和乘车）。引擎运行中也会立即注册 / 注销。 */
+    public synchronized void setUseStepDetector(boolean use) {
+        if (use == useStep) return;
+        useStep = use;
+        if (thread == null || stepSensor == null) return;
+        if (use) sm.registerListener(this, stepSensor, SensorManager.SENSOR_DELAY_NORMAL, handler);
+        else sm.unregisterListener(this, stepSensor);
+    }
 
     public void setDisplayRotation(int rotation) { displayRotation = rotation; }
 
     public void startDemo(long durationMs) {
-        demoStartMs = System.currentTimeMillis();
-        demoUntilMs = demoStartMs + durationMs;
+        long now = SystemClock.elapsedRealtime();
+        demoStartMs = now;
+        demoUntilMs = now + durationMs;
     }
 
-    public boolean demoActive() { return System.currentTimeMillis() < demoUntilMs; }
+    public boolean demoActive() { return SystemClock.elapsedRealtime() < demoUntilMs; }
 
     public synchronized void start() {
         if (thread != null) return;
+        resetState();
         thread = new HandlerThread("motion-sensors", Process.THREAD_PRIORITY_DISPLAY);
         thread.start();
         handler = new Handler(thread.getLooper());
-        haveUp = false;
-        haveGyro = false;
-        lastAccNs = 0;
-        lastGyroNs = 0;
         if (accSensor != null) sm.registerListener(this, accSensor, SAMPLE_US, handler);
         if (gyroSensor != null) sm.registerListener(this, gyroSensor, SAMPLE_US, handler);
         if (rotSensor != null) sm.registerListener(this, rotSensor, SAMPLE_US, handler);
@@ -148,6 +162,26 @@ public final class MotionEngine implements SensorEventListener {
 
     public boolean isRunning() { return thread != null; }
 
+    /**
+     * 每次启动都从干净的状态开始：不带上次熄屏前的滤波值和偏置（否则亮屏时圆点会跳一下，
+     * 或者带着旧偏置漂很久）。手持抑制从 0 开始，提示在约 1 秒内淡入。
+     */
+    private void resetState() {
+        haveUp = false;
+        haveGyro = false;
+        lastAccNs = 0;
+        lastGyroNs = 0;
+        f1 = f2 = r1 = r2 = 0;
+        y1 = y2 = 0;
+        fBias = rBias = yBias = 0;
+        gyroLpX = gyroLpY = gyroLpZ = 0;
+        gyroHfPow = 0;
+        handling = 0;
+        fwd[0] = 0; fwd[1] = 1; fwd[2] = 0;
+        right[0] = 1; right[1] = 0; right[2] = 0;
+        outForward = outRight = outYaw = 0;
+    }
+
     @Override
     public void onAccuracyChanged(Sensor sensor, int accuracy) {}
 
@@ -158,6 +192,7 @@ public final class MotionEngine implements SensorEventListener {
             case Sensor.TYPE_ROTATION_VECTOR:
                 SensorManager.getRotationMatrixFromVector(rotM, e.values);
                 // R 把设备坐标变换到世界坐标；世界 Z(向上) 在设备坐标中 = R 的第三行
+                if (Float.isNaN(rotM[6]) || Float.isNaN(rotM[7]) || Float.isNaN(rotM[8])) break;
                 u[0] = rotM[6];
                 u[1] = rotM[7];
                 u[2] = rotM[8];
@@ -193,7 +228,7 @@ public final class MotionEngine implements SensorEventListener {
             u[0] -= cx * dt;
             u[1] -= cy * dt;
             u[2] -= cz * dt;
-            normalize(u);
+            if (!normalize(u)) haveUp = false;
         }
 
         // 手持晃动检测：高频角速度能量大 → 用户在拿手机/转手机，而不是车在转
@@ -209,9 +244,11 @@ public final class MotionEngine implements SensorEventListener {
 
     private void onAccel(SensorEvent e) {
         final float ax = e.values[0], ay = e.values[1], az = e.values[2];
+        float amag = (float) Math.sqrt(ax * ax + ay * ay + az * az);
+        // 异常样本（全 0 / NaN / 自由落体）直接丢弃，避免把状态污染成 NaN
+        if (!(amag > 0.5f) || amag > 200f) return;
         float dt = lastAccNs == 0 ? 0.01f : clamp((e.timestamp - lastAccNs) * 1e-9f, 0.0005f, 0.1f);
         lastAccNs = e.timestamp;
-        float amag = (float) Math.sqrt(ax * ax + ay * ay + az * az);
 
         if (!haveUp) {
             if (rotSensor != null) return; // 等第一帧旋转矢量
@@ -223,36 +260,14 @@ public final class MotionEngine implements SensorEventListener {
             u[0] += (ax / amag - u[0]) * k;
             u[1] += (ay / amag - u[1]) * k;
             u[2] += (az / amag - u[2]) * k;
-            normalize(u);
+            if (!normalize(u)) { haveUp = false; return; }
         }
 
-        // ---- 屏幕坐标轴（设备坐标）随屏幕旋转变化 ----
-        float upx, upy; // 屏幕「上」
-        switch (displayRotation) {
-            case Surface.ROTATION_90:  upx = -1; upy = 0; break;
-            case Surface.ROTATION_180: upx = 0;  upy = -1; break;
-            case Surface.ROTATION_270: upx = 1;  upy = 0; break;
-            default:                   upx = 0;  upy = 1; break;
-        }
-        // 前方 = 水平化(屏幕上方) + 水平化(屏幕背面 -Z)。平放、斜拿、竖拿都成立。
-        float d1 = upx * u[0] + upy * u[1];
-        float hx = upx - d1 * u[0], hy = upy - d1 * u[1], hz = -d1 * u[2];
-        float d2 = -u[2];
-        hx += -d2 * u[0];
-        hy += -d2 * u[1];
-        hz += -1 - d2 * u[2];
-        float hl = (float) Math.sqrt(hx * hx + hy * hy + hz * hz);
-        if (hl > 0.15f) {
-            fwd[0] = hx / hl; fwd[1] = hy / hl; fwd[2] = hz / hl;
-        }
-        // 右方 = 前方 × 上方
-        float rx = fwd[1] * u[2] - fwd[2] * u[1];
-        float ry = fwd[2] * u[0] - fwd[0] * u[2];
-        float rz = fwd[0] * u[1] - fwd[1] * u[0];
+        updateAxes();
 
         // 前方/右方都在水平面内，所以直接点乘就得到「去重力」后的水平加速度
         float aF = ax * fwd[0] + ay * fwd[1] + az * fwd[2];
-        float aR = ax * rx + ay * ry + az * rz;
+        float aR = ax * right[0] + ay * right[1] + az * right[2];
         float yaw = haveGyro ? gyro[0] * u[0] + gyro[1] * u[1] + gyro[2] * u[2] : 0f;
 
         // ---- 两级低通 ----
@@ -262,10 +277,10 @@ public final class MotionEngine implements SensorEventListener {
         float ya = alpha(dt, YAW_LP_HZ);
         y1 += (yaw - y1) * ya; y2 += (y1 - y2) * ya;
 
-        // ---- 自适应去偏：信号大时（真实的加减速/转弯）几乎不更新偏置 ----
-        fBias += (f2 - fBias) * alphaTau(dt, ACC_BIAS_TAU) * adaptive(f2 - fBias, 0.6f);
-        rBias += (r2 - rBias) * alphaTau(dt, ACC_BIAS_TAU) * adaptive(r2 - rBias, 0.6f);
-        yBias += (y2 - yBias) * alphaTau(dt, YAW_BIAS_TAU) * adaptive(y2 - yBias, 0.08f);
+        // ---- 门限去偏：偏差超过门限（真实的加减速/转弯）就完全不学习，且偏置有上限 ----
+        fBias = updateBias(fBias, f2, dt, ACC_BIAS_TAU, ACC_BIAS_GATE_LO, ACC_BIAS_GATE_HI, ACC_BIAS_MAX);
+        rBias = updateBias(rBias, r2, dt, ACC_BIAS_TAU, ACC_BIAS_GATE_LO, ACC_BIAS_GATE_HI, ACC_BIAS_MAX);
+        yBias = updateBias(yBias, y2, dt, YAW_BIAS_TAU, YAW_BIAS_GATE_LO, YAW_BIAS_GATE_HI, YAW_BIAS_MAX);
         float fwdA = f2 - fBias;
         float rightA = r2 - rBias;
         float yawR = y2 - yBias;
@@ -279,14 +294,21 @@ public final class MotionEngine implements SensorEventListener {
         float outR = softDeadzone(rightA, ACC_DEADZONE) * handling;
         float outY = softDeadzone(yawR, YAW_DEADZONE) * handling;
 
+        if (Float.isNaN(outF) || Float.isNaN(outR) || Float.isNaN(outY)) {
+            // 理论上不会发生；万一发生就整体复位，绝不让 NaN 进入渲染
+            resetState();
+            return;
+        }
+
         // ---- 乘车检测 ----
         boolean veh = detector.onSample(e.timestamp, dt, amag, fwdA * handling, rightA * handling, outY);
 
         // ---- 演示模式：注入一段模拟的加速/刹车/转弯 ----
-        long now = System.currentTimeMillis();
+        long now = SystemClock.elapsedRealtime();
         if (now < demoUntilMs) {
             float t = (now - demoStartMs) / 1000f;
             outF = 2.2f * (float) Math.sin(2 * Math.PI * t / 4.0);
+            // 左转（yaw > 0）对应向左的向心加速度（outR < 0），两者符号保持一致
             outR = 1.6f * (float) Math.sin(2 * Math.PI * t / 5.0 + 1.0);
             outY = -0.25f * (float) Math.sin(2 * Math.PI * t / 5.0 + 1.0);
             LiveStats.demoActive = true;
@@ -313,7 +335,58 @@ public final class MotionEngine implements SensorEventListener {
         }
     }
 
+    /**
+     * 根据屏幕方向计算水平的「右方」和「前方」（设备坐标）。
+     *
+     * Display.getRotation() 是画面相对自然方向的旋转，与机身的物理旋转方向相反：
+     * 机身逆时针转 90° → ROTATION_90，此时屏幕右方 = 设备 -Y，屏幕上方 = 设备 +X。
+     */
+    private void updateAxes() {
+        float rsx, rsy, usx, usy;
+        switch (displayRotation) {
+            case Surface.ROTATION_90:  rsx = 0;  rsy = -1; usx = 1;  usy = 0;  break;
+            case Surface.ROTATION_180: rsx = -1; rsy = 0;  usx = 0;  usy = -1; break;
+            case Surface.ROTATION_270: rsx = 0;  rsy = 1;  usx = -1; usy = 0;  break;
+            default:                   rsx = 1;  rsy = 0;  usx = 0;  usy = 1;  break;
+        }
+
+        // 首选：右方 = 屏幕右方的水平投影；前方 = 上 × 右。侧倾手机时前后方向不会歪。
+        float d = rsx * u[0] + rsy * u[1];
+        float rx = rsx - d * u[0], ry = rsy - d * u[1], rz = -d * u[2];
+        float rl = (float) Math.sqrt(rx * rx + ry * ry + rz * rz);
+        if (rl > 0.3f) {
+            right[0] = rx / rl; right[1] = ry / rl; right[2] = rz / rl;
+            cross(u, right, fwd);
+            return;
+        }
+
+        // 屏幕右方几乎竖直（手机侧立）：改用 水平化(屏幕上方) + 水平化(屏幕背面 -Z) 作为前方
+        float d1 = usx * u[0] + usy * u[1];
+        float hx = usx - d1 * u[0], hy = usy - d1 * u[1], hz = -d1 * u[2];
+        float d2 = -u[2];
+        hx += -d2 * u[0];
+        hy += -d2 * u[1];
+        hz += -1 - d2 * u[2];
+        float hl = (float) Math.sqrt(hx * hx + hy * hy + hz * hz);
+        if (hl > 0.15f) {
+            fwd[0] = hx / hl; fwd[1] = hy / hl; fwd[2] = hz / hl;
+        } else {
+            // 退化姿态：沿用上一次的前方，但重新投影到当前水平面
+            float dd = fwd[0] * u[0] + fwd[1] * u[1] + fwd[2] * u[2];
+            fwd[0] -= dd * u[0]; fwd[1] -= dd * u[1]; fwd[2] -= dd * u[2];
+            if (!normalize(fwd)) { fwd[0] = 0; fwd[1] = 1; fwd[2] = 0; }
+        }
+        cross(fwd, u, right);
+    }
+
     // ---------------- 工具函数 ----------------
+
+    private static float updateBias(float bias, float x, float dt, float tau, float gateLo, float gateHi, float max) {
+        float diff = x - bias;
+        float w = 1f - smoothstep(gateLo, gateHi, Math.abs(diff));
+        if (w > 0f) bias += diff * alphaTau(dt, tau) * w;
+        return clamp(bias, -max, max);
+    }
 
     /** 一阶低通系数（截止频率 hz） */
     static float alpha(float dt, float hz) {
@@ -324,12 +397,6 @@ public final class MotionEngine implements SensorEventListener {
     /** 一阶低通系数（时间常数 tau 秒） */
     static float alphaTau(float dt, float tau) {
         return dt / (tau + dt);
-    }
-
-    /** 差值越大，更新越慢 */
-    private static float adaptive(float diff, float scale) {
-        float q = diff / scale;
-        return 1f / (1f + q * q * q * q);
     }
 
     /** 平滑死区：小信号趋近 0，大信号几乎不变 */
@@ -347,8 +414,19 @@ public final class MotionEngine implements SensorEventListener {
         return v < lo ? lo : (v > hi ? hi : v);
     }
 
-    private static void normalize(float[] v) {
+    /** out = a × b */
+    private static void cross(float[] a, float[] b, float[] out) {
+        float x = a[1] * b[2] - a[2] * b[1];
+        float y = a[2] * b[0] - a[0] * b[2];
+        float z = a[0] * b[1] - a[1] * b[0];
+        out[0] = x; out[1] = y; out[2] = z;
+    }
+
+    /** @return false 表示向量长度为 0 或 NaN，无法归一化 */
+    private static boolean normalize(float[] v) {
         float l = (float) Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-        if (l > 1e-6f) { v[0] /= l; v[1] /= l; v[2] /= l; }
+        if (!(l > 1e-6f)) return false;
+        v[0] /= l; v[1] /= l; v[2] /= l;
+        return true;
     }
 }

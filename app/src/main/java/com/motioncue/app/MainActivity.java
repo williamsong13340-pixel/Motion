@@ -145,6 +145,10 @@ public final class MainActivity extends Activity {
             int mode = (Integer) v.getTag();
             if (mode != Prefs.MODE_OFF && !Settings.canDrawOverlays(this)) {
                 overlayBtn.performClick();
+            } else if (mode == Prefs.MODE_AUTO && Build.VERSION.SDK_INT >= 29
+                    && !granted(Manifest.permission.ACTIVITY_RECOGNITION)) {
+                // 自动模式靠计步器区分走路和乘车，最准确
+                requestPermissions(new String[]{Manifest.permission.ACTIVITY_RECOGNITION}, REQ_PERMS);
             }
             Prefs.setMode(this, mode);
             MotionService.sync(this);
@@ -286,6 +290,8 @@ public final class MainActivity extends Activity {
     private void addRadio(RadioGroup g, int id, String text) {
         RadioButton rb = new RadioButton(this);
         rb.setId(View.generateViewId());
+        // 界面每次都按当前设置重建；不让系统在进程重建后恢复旧的勾选状态（会把模式改回旧值）
+        rb.setSaveEnabled(false);
         rb.setText(text);
         rb.setTag(id);
         rb.setPadding(dp(4), dp(6), 0, dp(6));
@@ -321,6 +327,7 @@ public final class MainActivity extends Activity {
             RadioButton rb = new RadioButton(this);
             ids[i] = View.generateViewId();
             rb.setId(ids[i]);
+            rb.setSaveEnabled(false);
             rb.setText(labels[i]);
             rb.setPadding(0, 0, dp(12), 0);
             g.addView(rb);
@@ -417,9 +424,9 @@ public final class MainActivity extends Activity {
                     LiveStats.accelForward, LiveStats.accelRight, LiveStats.yawRate,
                     (1 - LiveStats.handlingGain) * 100));
             sb.append(String.format(Locale.US,
-                    "\n乘车判断：%s（分数 %.1f / 进入≥8）\n振动 %.3f · 步频 %.2f · 操控 %.2f",
+                    "\n乘车判断：%s（分数 %.1f / 进入≥8）\n振动 %.3f · 步频能量 %.2f · 步频周期 %.2f · 操控 %.2f",
                     LiveStats.inVehicle ? "在车上" : "不在车上", LiveStats.vehicleScore,
-                    LiveStats.vibRms, LiveStats.walkRms, LiveStats.motionRms));
+                    LiveStats.vibRms, LiveStats.walkRms, LiveStats.walkPeriodicity, LiveStats.motionRms));
         }
         liveText.setText(sb.toString());
     }

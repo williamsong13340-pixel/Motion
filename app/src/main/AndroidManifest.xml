@@ -36,6 +36,14 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".StarterActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <service
             android:name=".MotionService"
             android:exported="false"

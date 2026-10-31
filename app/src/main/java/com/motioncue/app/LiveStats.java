@@ -19,6 +19,7 @@ public final class LiveStats {
     public static volatile float vehicleScore;
     public static volatile float vibRms;
     public static volatile float walkRms;
+    public static volatile float walkPeriodicity; // 0..1，步频周期性
     public static volatile float motionRms;
     public static volatile long lastStepMs;
 

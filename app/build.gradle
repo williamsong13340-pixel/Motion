@@ -16,8 +16,9 @@ android {
     }
 
     signingConfigs {
-        // 固定签名：每次 CI 构建的 APK 签名一致，可直接覆盖升级。
-        // 如需私有签名，在仓库 Secrets 中配置 KEYSTORE_BASE64 / KEYSTORE_PASSWORD 等即可覆盖。
+        // 默认使用仓库内公开的固定签名：每次 CI 构建签名一致，可直接覆盖升级，但任何人都能用它签名。
+        // 私有签名：设置环境变量 KEYSTORE_FILE / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD；
+        // CI 中只需在仓库 Secrets 配置 KEYSTORE_BASE64（keystore 的 base64）和这三个密码/别名，工作流会自动解码使用。
         release {
             storeFile file(System.getenv('KEYSTORE_FILE') ?: 'motioncue.keystore')
             storePassword System.getenv('KEYSTORE_PASSWORD') ?: 'motioncue'

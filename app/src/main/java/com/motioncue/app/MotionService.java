@@ -1,6 +1,7 @@
 package com.motioncue.app;
 
 import android.Manifest;
+import android.app.AppOpsManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -44,6 +45,7 @@ public final class MotionService extends Service implements MotionEngine.Listene
     private MotionEngine engine;
     private OverlayController overlay;
     private DisplayManager dm;
+    private AppOpsManager appOps;
     private boolean screenOn = true;
     private long screenOffAt;
 
@@ -65,23 +67,33 @@ public final class MotionService extends Service implements MotionEngine.Listene
         }
     };
 
-    public static void start(Context c, String action) {
+    /** 悬浮窗权限被授予 / 撤销时（系统不会通知应用，只能监听 AppOps） */
+    private final AppOpsManager.OnOpChangedListener overlayOpListener =
+            (op, pkg) -> main.postDelayed(this::applyState, 300);
+
+    /**
+     * 启动（或通知）前台服务。
+     * @return false 表示系统拒绝了启动（例如 Android 15 在后台、且当前没有可见悬浮窗时）
+     */
+    public static boolean start(Context c, String action) {
         Intent i = new Intent(c, MotionService.class).setAction(action);
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) c.startForegroundService(i);
             else c.startService(i);
-        } catch (RuntimeException ignored) {
-            // 后台启动受限等情况：用户打开 App 时会再次启动
+            return true;
+        } catch (RuntimeException e) {
+            // ForegroundServiceStartNotAllowedException 等
+            return false;
         }
     }
 
-    /** 根据当前设置启动或停止服务 */
-    public static void sync(Context c) {
-        if (Prefs.mode(c) == Prefs.MODE_OFF) {
-            if (LiveStats.serviceRunning) start(c, ACTION_APPLY); // 让服务自己停掉
-        } else {
-            start(c, ACTION_APPLY);
-        }
+    /**
+     * 设置改变后调用：需要时启动服务。
+     * 关闭时什么都不用做——正在运行的服务通过设置监听自己停止（再发一次启动反而会重新创建服务）。
+     */
+    public static boolean sync(Context c) {
+        if (Prefs.mode(c) == Prefs.MODE_OFF) return true;
+        return start(c, ACTION_APPLY);
     }
 
     @Override
@@ -118,6 +130,12 @@ public final class MotionService extends Service implements MotionEngine.Listene
         PowerManager pm = getSystemService(PowerManager.class);
         screenOn = pm == null || pm.isInteractive();
 
+        appOps = getSystemService(AppOpsManager.class);
+        try {
+            appOps.startWatchingMode(AppOpsManager.OPSTR_SYSTEM_ALERT_WINDOW, getPackageName(), overlayOpListener);
+        } catch (RuntimeException ignored) {
+        }
+
         Prefs.sp(this).registerOnSharedPreferenceChangeListener(this);
         LiveStats.serviceRunning = true;
     }
@@ -150,6 +168,8 @@ public final class MotionService extends Service implements MotionEngine.Listene
             return;
         }
         if (!Settings.canDrawOverlays(this)) {
+            // 权限被撤销：传感器和动画也一起停掉，等权限恢复（AppOps 监听会再次调用这里）
+            engine.stop();
             overlay.removeNow();
             updateNotification();
             return;
@@ -171,7 +191,7 @@ public final class MotionService extends Service implements MotionEngine.Listene
 
     @Override
     public void onMotionSample() {
-        overlay.view().onSensorSample();
+        overlay.field().onSensorSample();
     }
 
     @Override
@@ -183,11 +203,18 @@ public final class MotionService extends Service implements MotionEngine.Listene
 
     @Override
     public void onSharedPreferenceChanged(SharedPreferences sp, String key) {
-        if (Prefs.K_MODE.equals(key)) {
+        if (key == null) {                       // 设置被清空（Android 11+）
             applyState();
-        } else {
-            overlay.applySettings();
+            overlay.applySettings(true);
+        } else if (Prefs.K_MODE.equals(key)) {
+            applyState();
+        } else if (Prefs.K_SENS.equals(key) || Prefs.K_YAW.equals(key)) {
+            overlay.applySettings(false);        // 只影响位移，不用重建窗口
+        } else if (Prefs.K_SIZE.equals(key) || Prefs.K_COUNT.equals(key) || Prefs.K_OPACITY.equals(key)
+                || Prefs.K_LAYOUT.equals(key) || Prefs.K_COLOR.equals(key) || Prefs.K_REFRESH.equals(key)) {
+            overlay.applySettings(true);
         }
+        // K_LAST_MODE / K_BOOT 与显示无关
     }
 
     // ---------------- 屏幕：旋转与刷新率 ----------------
@@ -205,6 +232,7 @@ public final class MotionService extends Service implements MotionEngine.Listene
         if (d == null) return;
         engine.setDisplayRotation(d.getRotation());
         LiveStats.displayHz = d.getRefreshRate();
+        overlay.onDisplayChanged();
     }
 
     // ---------------- 通知 ----------------
@@ -220,7 +248,9 @@ public final class MotionService extends Service implements MotionEngine.Listene
         int mode = Prefs.mode(this);
         String text;
         if (!Settings.canDrawOverlays(this)) {
-            text = "需要「悬浮窗」权限，点此打开设置";
+            text = "需要「悬浮窗」权限，点此打开 App 授权";
+        } else if (engine != null && engine.demoActive()) {
+            text = "演示中";
         } else if (mode == Prefs.MODE_ALWAYS) {
             text = "始终显示运动提示圆点";
         } else if (engine != null && engine.detector().isInVehicle()) {
@@ -269,6 +299,10 @@ public final class MotionService extends Service implements MotionEngine.Listene
     @Override
     public void onDestroy() {
         Prefs.sp(this).unregisterOnSharedPreferenceChangeListener(this);
+        try {
+            appOps.stopWatchingMode(overlayOpListener);
+        } catch (RuntimeException ignored) {
+        }
         try {
             unregisterReceiver(screenReceiver);
         } catch (RuntimeException ignored) {
